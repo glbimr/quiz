@@ -118,6 +118,35 @@
         }
         .q-panel-btn:active { transform: scale(0.95); }
 
+        /* Admin report layout */
+        #reportContainer {
+            width: 100%;
+        }
+
+        #reportContainer h1,
+        #reportContainer h2,
+        #reportContainer h3,
+        #reportContainer h4 {
+            overflow-wrap: anywhere;
+        }
+
+        @media print {
+            #reportContainer {
+                max-width: none !important;
+            }
+            #reportContainer .shadow-sm,
+            #reportContainer .shadow-xl {
+                box-shadow: none !important;
+            }
+            #reportContainer .rounded-2xl,
+            #reportContainer .rounded-xl {
+                border-radius: 8px !important;
+            }
+            #reportContainer .mb-5 {
+                margin-bottom: 12px !important;
+            }
+        }
+
         /* Print Engine Overrides */
         @media print {
             .no-print { display: none !important; }
@@ -391,11 +420,19 @@
         }
 
         // Helper to race promise against network timeout
-        function withTimeout(promise, ms = 4000) {
+        function withTimeout(promise, ms = 10000) {
             return Promise.race([
                 promise,
                 new Promise((_, reject) => setTimeout(() => reject(new Error('Network request timed out')), ms))
             ]);
+        }
+
+        function isBrowserOnline() {
+            return navigator.onLine !== false;
+        }
+
+        function getConnectionLabel() {
+            return isBrowserOnline() ? 'Online' : 'Offline';
         }
 
         async function fetchQuizActiveStatus() {
@@ -419,15 +456,15 @@
         }
 
         async function uploadResultToSupabase(resultData, detailedResponses, timeLeftSeconds) {
-            const submissionUUID = resultData.id || generateUUID(); 
+            const submissionUUID = resultData.id || generateUUID();
             const dataToInsert = {
                 student_id: submissionUUID,
                 quiz_id: STATIC_QUIZ_UUID,
                 score: resultData.score,
                 total_questions: resultData.total,
-                percentage: resultData.percentage.toString(), 
+                percentage: resultData.percentage.toString(),
                 total_violations: resultData.violations,
-                window_switch_violations: resultData.windowSwitchViolations, 
+                window_switch_violations: resultData.windowSwitchViolations,
                 copy_paste_violations: resultData.copyPasteViolations,
                 submission_time: new Date().toISOString(),
                 student_name: resultData.name,
@@ -439,20 +476,29 @@
             };
 
             try {
-                if (!client) throw new Error("Supabase client unavailable");
+                if (!client) throw new Error("Database client is unavailable");
 
                 const { error } = await withTimeout(
                     client.from(SUPABASE_SUBMISSIONS_TABLE).insert([dataToInsert]),
-                    4000
-                ); 
+                    10000
+                );
 
-                if (error) throw error; 
-                return { success: true };
+                if (error) throw error;
+
+                return {
+                    success: true,
+                    source: 'remote',
+                    message: 'Result successfully stored in the online database.'
+                };
             } catch (e) {
-                console.warn('Upload Exception (Saved to local storage):', e.message);
-                return { 
-                    success: false, 
-                    message: "Saved to local storage (Database connection unavailable)." 
+                console.warn('Remote result upload failed:', e.message);
+
+                return {
+                    success: false,
+                    source: 'local',
+                    message: isBrowserOnline()
+                        ? 'Online connection is available, but the database request failed. The result was retained locally on this device.'
+                        : 'The browser is offline. The result was retained locally on this device.'
                 };
             }
         }
@@ -462,17 +508,18 @@
             isUsingFallbackQuestions = false;
 
             try {
-                if (!client) throw new Error("Supabase client not initialized");
+                if (!client) throw new Error("Database client is unavailable");
 
                 const { data, error } = await withTimeout(
-                    client.from(SUPABASE_QUESTIONS_TABLE).select('question, answer, option_a, option_b, option_c, option_d'),
-                    3500
+                    client.from(SUPABASE_QUESTIONS_TABLE)
+                        .select('question, answer, option_a, option_b, option_c, option_d'),
+                    10000
                 );
-                
+
                 if (error) throw error;
 
                 if (!data || data.length === 0) {
-                    throw new Error("No remote questions returned from table");
+                    throw new Error("No questions were returned from the online question bank");
                 }
 
                 quizQuestions = data.map(q => ({
@@ -480,12 +527,17 @@
                     options: [q.option_a, q.option_b, q.option_c, q.option_d],
                     answer: q.answer
                 }));
-                
+
             } catch (e) {
-                console.warn('Supabase fetch failed or timed out. Switching to offline questions:', e.message);
+                console.warn('Online question-bank request failed:', e.message);
                 isUsingFallbackQuestions = true;
                 quizQuestions = JSON.parse(JSON.stringify(FALLBACK_QUESTIONS));
-                showTempMessage("Offline question bank loaded (Network unreachable)", false);
+
+                const message = isBrowserOnline()
+                    ? `Online question bank unavailable (${e.message}). Using the built-in backup question bank.`
+                    : 'Browser is offline. Using the built-in backup question bank.';
+
+                showTempMessage(message, true);
             } finally {
                 studentResponses = Array(quizQuestions.length).fill(null);
                 questionStatus = Array(quizQuestions.length).fill(0);
@@ -866,7 +918,7 @@
             if (loadingIndicator) loadingIndicator.style.display = 'none';
 
             startQuizBtn.disabled = false;
-            const modeTag = isUsingFallbackQuestions ? ' (Offline Mode)' : '';
+            const modeTag = isUsingFallbackQuestions ? ' • Backup Bank' : ' • Online';
             startQuizBtn.innerHTML = `Continue to Proctoring Rules (${quizQuestions.length} Questions)${modeTag} <i class="fas fa-arrow-right"></i>`;
 
             document.getElementById('signInForm').addEventListener('submit', function(e) { 
@@ -1270,27 +1322,46 @@
 
             try {
                 let data = null;
+                let reportSource = 'remote';
 
                 if (client) {
-                    const res = await withTimeout(
-                        client.from(SUPABASE_SUBMISSIONS_TABLE).select('*').eq('id', submissionId).single(),
-                        3000
-                    ).catch(() => null);
-                    if (res && res.data) data = res.data;
+                    try {
+                        const res = await withTimeout(
+                            client.from(SUPABASE_SUBMISSIONS_TABLE)
+                                .select('*')
+                                .eq('id', submissionId)
+                                .single(),
+                            10000
+                        );
+
+                        if (!res.error && res.data) {
+                            data = res.data;
+                        }
+                    } catch (remoteError) {
+                        console.warn('Remote report fetch failed:', remoteError.message);
+                    }
                 }
 
                 if (!data) {
-                    const localSubmissions = JSON.parse(localStorage.getItem('quizLeaderboard') || '[]');
-                    const found = localSubmissions.find(s => s.id === submissionId || s.admissionNo === submissionId);
+                    reportSource = 'local';
+                    const localSubmissions = JSON.parse(
+                        localStorage.getItem('quizLeaderboard') || '[]'
+                    );
+                    const found = localSubmissions.find(
+                        s => s.id === submissionId || s.admissionNo === submissionId
+                    );
+
                     if (found) {
                         data = {
                             student_name: found.name,
+                            college_email: found.email,
                             admission_no: found.admissionNo,
                             section: found.section,
                             score: found.score,
                             total_questions: found.total,
                             percentage: found.percentage,
                             total_violations: found.violations,
+                            submission_time: found.timestamp,
                             student_responses_json: []
                         };
                     }
@@ -1298,77 +1369,195 @@
 
                 if (!data) throw new Error("Submission record not found.");
 
-                const reportData = data.student_responses_json || [];
-                const totalTimeSpent = reportData.reduce((sum, q) => sum + (q.time_spent_seconds || 0), 0);
+                const reportData = Array.isArray(data.student_responses_json)
+                    ? data.student_responses_json
+                    : [];
 
-                APP_CONTAINER.className = "flex items-start justify-center min-h-screen p-4 bg-slate-100";
+                const totalTimeSpent = reportData.reduce(
+                    (sum, q) => sum + (Number(q.time_spent_seconds) || 0),
+                    0
+                );
+
+                const escapeHtml = (value) => String(value ?? '')
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#039;');
+
+                const sourceBanner = reportSource === 'remote'
+                    ? `<div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-bold">
+                            <i class="fas fa-cloud"></i> Online database report
+                       </div>`
+                    : `<div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 text-xs font-bold">
+                            <i class="fas fa-database"></i> Local backup report
+                       </div>`;
+
+                const submissionDate = data.submission_time
+                    ? new Date(data.submission_time).toLocaleString()
+                    : 'N/A';
+
+                APP_CONTAINER.className = "min-h-screen p-4 md:p-8 bg-slate-100";
                 APP_CONTAINER.innerHTML = `
-                    <div class="w-full max-w-5xl bg-white rounded-2xl shadow-xl border border-slate-200/80 p-8 mt-6 mb-12" id="reportContainer">
-                        <div class="flex justify-between items-center mb-6 border-b pb-4 no-print">
-                            <h2 class="text-xl font-bold text-slate-800">Student Examination Report</h2>
-                            <div class="flex gap-2">
-                                <button onclick="saveReportAsPdf()" class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white font-bold rounded-xl shadow text-xs flex items-center gap-2"><i class="fas fa-file-pdf"></i> Print / Save PDF</button>
-                        <div class="grid grid-cols-1 md:grid-cols-5 gap-4 mb-6">
-                            <div class="p-4 bg-slate-50 rounded-xl border border-slate-200">
-                                <p class="text-xs font-semibold text-slate-500">Student Name</p>
-                                <p class="text-base font-bold text-slate-900">${data.student_name}</p>
-                            </div>
-                            <div class="p-4 bg-slate-50 rounded-xl border border-slate-200">
-                                <p class="text-xs font-semibold text-slate-500">Admission No.</p>
-                                <p class="text-base font-bold text-slate-900">${data.admission_no}</p>
-                            </div>
-                            <div class="p-4 bg-slate-50 rounded-xl border border-slate-200">
-                                <p class="text-xs font-semibold text-slate-500">Section</p>
-                                <p class="text-base font-bold text-slate-900">${data.section || 'N/A'}</p>
-                            </div>
-                            <div class="p-4 bg-emerald-50 rounded-xl border border-emerald-200">
-                                <p class="text-xs font-semibold text-emerald-700">Score Achieved</p>
-                                <p class="text-base font-bold text-emerald-900">${data.score} / ${data.total_questions} (${data.percentage}%)</p>
-                            </div>
-                            <div class="p-4 bg-red-50 rounded-xl border border-red-200">
-                                <p class="text-xs font-semibold text-red-700">Violations</p>
-                                <p class="text-base font-bold text-red-900">${data.total_violations}</p>
-                            </div>
-                        </div>
+                    <div class="w-full max-w-6xl mx-auto" id="reportContainer">
 
-                        <div class="mb-6 p-4 bg-blue-50 rounded-xl border border-blue-200 text-xs">
-                            <p class="font-bold text-blue-900 mb-1"><i class="far fa-clock"></i> Time Statistics:</p>
-                            <p class="text-slate-700">Active Question Time: <span class="font-bold text-slate-900">${formatTime(totalTimeSpent)}</span></p>
-                        </div>
-                        
-                        <h3 class="text-lg font-bold text-slate-800 mb-4">Question Breakdown</h3>
-                        <div class="space-y-4">
-                            ${reportData.length === 0 ? '<p class="text-slate-500 text-xs">Detailed response breakdown saved locally on device.</p>' : ''}
-                            ${reportData.map(q => {
-                                const isAnswered = q.student_response !== null && q.student_response !== undefined;
-                                let cardClass = 'bg-slate-50 border-slate-200'; 
-                                let iconClass = 'fa-circle-question text-slate-400';
-                                let responseText = '<span class="italic text-slate-400">Not Attempted</span>';
-                                
-                                if (isAnswered) {
-                                    responseText = q.student_response;
-                                    if (q.is_correct) {
-                                        cardClass = 'bg-emerald-50/60 border-emerald-200'; 
-                                        iconClass = 'fa-circle-check text-emerald-600';
-                                    } else {
-                                        cardClass = 'bg-red-50/60 border-red-200'; 
-                                        iconClass = 'fa-circle-xmark text-red-600';
-                                    }
-                                }
-
-                                return `
-                                    <div class="p-4 rounded-xl border ${cardClass} text-xs space-y-2">
-                                        <div class="flex justify-between items-start gap-2">
-                                            <h4 class="font-bold text-slate-900 text-sm">Q${q.question_number}: ${q.question_text}</h4>
-                                            <i class="fas ${iconClass} text-lg"></i>
+                        <!-- Report header -->
+                        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 md:p-7 mb-5">
+                            <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                                <div>
+                                    <div class="flex items-center gap-3 mb-2">
+                                        <div class="w-11 h-11 rounded-xl bg-blue-100 text-blue-600 flex items-center justify-center">
+                                            <i class="fas fa-file-lines text-lg"></i>
                                         </div>
-                                        <div class="pt-2 border-t border-slate-200/60 grid grid-cols-1 md:grid-cols-2 gap-2">
-                                            <p><span class="font-bold text-slate-500">Response:</span> <span class="font-bold text-slate-800">${responseText}</span></p>
-                                            <p><span class="font-bold text-slate-500">Correct Answer:</span> <span class="font-bold text-emerald-700">${q.correct_answer}</span></p>
+                                        <div>
+                                            <h2 class="text-2xl font-extrabold text-slate-900">Student Examination Report</h2>
+                                            <p class="text-xs text-slate-500 mt-0.5">Detailed examination performance and response analysis</p>
                                         </div>
                                     </div>
-                                `;
-                            }).join('')}
+                                </div>
+
+                                <div class="flex flex-wrap items-center gap-2 no-print">
+                                    ${sourceBanner}
+                                    <button onclick="setView('leaderboard')"
+                                        class="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition flex items-center gap-2">
+                                        <i class="fas fa-arrow-left"></i> Back to Dashboard
+                                    </button>
+                                    <button onclick="saveReportAsPdf()"
+                                        class="px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white font-bold rounded-xl shadow-sm text-xs transition flex items-center gap-2">
+                                        <i class="fas fa-file-pdf"></i> Print / Save PDF
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Student identity -->
+                        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 md:p-6 mb-5">
+                            <div class="flex items-center gap-2 mb-4">
+                                <i class="fas fa-user-graduate text-blue-600"></i>
+                                <h3 class="text-sm font-extrabold uppercase tracking-wider text-slate-700">Student Information</h3>
+                            </div>
+
+                            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                                <div class="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                                    <p class="text-[11px] font-bold uppercase tracking-wide text-slate-500 mb-1">Student Name</p>
+                                    <p class="font-bold text-slate-900 break-words">${escapeHtml(data.student_name)}</p>
+                                </div>
+                                <div class="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                                    <p class="text-[11px] font-bold uppercase tracking-wide text-slate-500 mb-1">Admission No.</p>
+                                    <p class="font-bold text-slate-900 break-words">${escapeHtml(data.admission_no)}</p>
+                                </div>
+                                <div class="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                                    <p class="text-[11px] font-bold uppercase tracking-wide text-slate-500 mb-1">Section</p>
+                                    <p class="font-bold text-slate-900">${escapeHtml(data.section || 'N/A')}</p>
+                                </div>
+                                <div class="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                                    <p class="text-[11px] font-bold uppercase tracking-wide text-slate-500 mb-1">Submission Time</p>
+                                    <p class="font-bold text-slate-900 text-sm">${escapeHtml(submissionDate)}</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Performance summary -->
+                        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+                            <div class="bg-white rounded-2xl border border-emerald-200 shadow-sm p-5">
+                                <p class="text-xs font-bold uppercase tracking-wide text-emerald-700 mb-2">Score</p>
+                                <p class="text-2xl font-extrabold text-slate-900">
+                                    ${escapeHtml(data.score)} <span class="text-base text-slate-400">/ ${escapeHtml(data.total_questions)}</span>
+                                </p>
+                                <p class="text-xs font-semibold text-emerald-700 mt-1">${escapeHtml(data.percentage)}%</p>
+                            </div>
+
+                            <div class="bg-white rounded-2xl border border-blue-200 shadow-sm p-5">
+                                <p class="text-xs font-bold uppercase tracking-wide text-blue-700 mb-2">Active Time</p>
+                                <p class="text-2xl font-extrabold text-slate-900">${formatTime(totalTimeSpent)}</p>
+                                <p class="text-xs text-slate-500 mt-1">Across recorded questions</p>
+                            </div>
+
+                            <div class="bg-white rounded-2xl border border-red-200 shadow-sm p-5">
+                                <p class="text-xs font-bold uppercase tracking-wide text-red-700 mb-2">Violations</p>
+                                <p class="text-2xl font-extrabold text-slate-900">${escapeHtml(data.total_violations || 0)}</p>
+                                <p class="text-xs text-slate-500 mt-1">Proctoring events recorded</p>
+                            </div>
+
+                            <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                                <p class="text-xs font-bold uppercase tracking-wide text-slate-500 mb-2">Responses</p>
+                                <p class="text-2xl font-extrabold text-slate-900">${reportData.length}</p>
+                                <p class="text-xs text-slate-500 mt-1">Detailed responses available</p>
+                            </div>
+                        </div>
+
+                        <!-- Detailed response section -->
+                        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 md:p-7">
+                            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-5">
+                                <div>
+                                    <h3 class="text-xl font-extrabold text-slate-900">Question Breakdown</h3>
+                                    <p class="text-xs text-slate-500 mt-1">Review each response, correctness, and recorded time.</p>
+                                </div>
+                                <span class="text-xs font-bold text-slate-500">${reportData.length} detailed record(s)</span>
+                            </div>
+
+                            ${reportData.length === 0
+                                ? `<div class="p-6 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-sm">
+                                        <i class="fas fa-circle-info mr-2"></i>
+                                        Detailed question responses are not available in this local backup record.
+                                   </div>`
+                                : `<div class="space-y-3">
+                                    ${reportData.map(q => {
+                                        const isAnswered = q.student_response !== null && q.student_response !== undefined && q.student_response !== '';
+                                        const isCorrect = q.is_correct === true;
+
+                                        const cardClass = !isAnswered
+                                            ? 'bg-slate-50 border-slate-200'
+                                            : (isCorrect ? 'bg-emerald-50/50 border-emerald-200' : 'bg-red-50/50 border-red-200');
+
+                                        const iconClass = !isAnswered
+                                            ? 'fa-circle-question text-slate-400'
+                                            : (isCorrect ? 'fa-circle-check text-emerald-600' : 'fa-circle-xmark text-red-600');
+
+                                        const statusText = !isAnswered
+                                            ? 'Not Attempted'
+                                            : (isCorrect ? 'Correct' : 'Incorrect');
+
+                                        const statusClass = !isAnswered
+                                            ? 'bg-slate-100 text-slate-600'
+                                            : (isCorrect ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700');
+
+                                        return `
+                                            <div class="p-4 md:p-5 rounded-xl border ${cardClass}">
+                                                <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
+                                                    <div class="min-w-0">
+                                                        <div class="flex items-center gap-2 mb-2">
+                                                            <span class="text-xs font-extrabold text-slate-500">Q${escapeHtml(q.question_number)}</span>
+                                                            <span class="px-2 py-1 rounded-full text-[10px] font-extrabold ${statusClass}">${statusText}</span>
+                                                        </div>
+                                                        <h4 class="font-bold text-slate-900 text-sm md:text-base leading-relaxed break-words">
+                                                            ${escapeHtml(q.question_text)}
+                                                        </h4>
+                                                    </div>
+                                                    <i class="fas ${iconClass} text-xl shrink-0"></i>
+                                                </div>
+
+                                                <div class="mt-4 pt-4 border-t border-slate-200/70 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                                                    <div class="p-3 bg-white/70 rounded-lg border border-slate-200/70">
+                                                        <p class="font-bold text-slate-500 mb-1">Student Response</p>
+                                                        <p class="font-semibold text-slate-900 break-words">
+                                                            ${isAnswered ? escapeHtml(q.student_response) : '<span class="italic text-slate-400">Not Attempted</span>'}
+                                                        </p>
+                                                    </div>
+                                                    <div class="p-3 bg-white/70 rounded-lg border border-slate-200/70">
+                                                        <p class="font-bold text-slate-500 mb-1">Correct Answer</p>
+                                                        <p class="font-semibold text-emerald-700 break-words">${escapeHtml(q.correct_answer)}</p>
+                                                    </div>
+                                                    <div class="p-3 bg-white/70 rounded-lg border border-slate-200/70">
+                                                        <p class="font-bold text-slate-500 mb-1">Time Spent</p>
+                                                        <p class="font-semibold text-slate-900">${formatTime(Number(q.time_spent_seconds) || 0)}</p>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        `;
+                                    }).join('')}
+                                </div>`
+                            }
                         </div>
                     </div>
                 `;
@@ -1383,7 +1572,7 @@
         async function renderLeaderboard() {
             APP_CONTAINER.className = "flex items-start justify-center min-h-screen p-4 bg-slate-100";
             APP_CONTAINER.innerHTML = `
-                <div class="w-full max-w-6xl bg-white rounded-2xl shadow-xl border border-slate-200/80 p-8 mt-6 mb-12">
+                <div class="w-full max-w-7xl bg-white rounded-2xl shadow-xl border border-slate-200/80 p-5 md:p-7 mt-4 mb-10">
                     <div class="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
                         <h2 class="text-2xl font-bold text-slate-800">Admin Submissions Dashboard</h2>
                         <div class="flex flex-wrap gap-2">
@@ -1480,7 +1669,7 @@
                     }
                 }
 
-                // Fallback to local storage records if remote table returns null/fails
+                // Use local storage only when the remote database cannot be read.
                 if (!data) {
                     const localSubmissions = JSON.parse(localStorage.getItem('quizLeaderboard') || '[]');
                     data = localSubmissions.map(item => ({
@@ -1550,8 +1739,12 @@
                     }
                     isQuizActive = newStatus; 
                 } catch (e) {
-                    showTempMessage("Status updated locally.", false);
-                    isQuizActive = newStatus;
+                    showTempMessage(
+                        isBrowserOnline()
+                            ? "Could not update the online exam status."
+                            : "Browser is offline; exam status was not changed online.",
+                        true
+                    );
                 } finally {
                     quizToggleBtn.disabled = false;
                     quizToggleBtn.textContent = `Global Exam: ${isQuizActive ? 'ENABLED' : 'DISABLED'}`;
