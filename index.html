@@ -1,0 +1,1559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AI Proctored Quiz</title>
+    <!-- External Dependencies: Tailwind CSS, FontAwesome Icons, Supabase JS v2 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    
+    <style>
+        /* Base Setup & Smooth Scrolling */
+        html, body { 
+            min-height: 100vh; 
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
+        }
+        #app { min-height: 100vh; }
+        
+        /* Quiz Progress Bar & Timers */
+        #progressBarContainer { 
+            position: relative; 
+            height: 10px; 
+            background-color: #e5e7eb; 
+            border-radius: 6px; 
+            overflow: hidden; 
+            margin-bottom: 12px; 
+        }
+        #progressBar { 
+            height: 100%; 
+            width: 100%; 
+            background: linear-gradient(90deg, #ef4444, #f59e0b); 
+            transition: width 1s linear; 
+        }
+        #countdownTimer { 
+            font-size: 1.15rem; 
+            font-weight: 700; 
+            color: #dc2626; 
+            text-align: center; 
+            margin-bottom: 12px; 
+            padding: 10px;
+            border: 2px solid #fca5a5;
+            border-radius: 10px;
+            background-color: #fef2f2;
+            box-shadow: 0 2px 4px rgba(220, 38, 38, 0.05);
+        }
+        
+        /* Fullscreen Overlay & Modals */
+        #loadingOverlay {
+            position: fixed; inset: 0; background: rgba(255,255,255,0.96); 
+            z-index: 100; display: none; flex-direction: column; justify-content: center; align-items: center;
+            backdrop-filter: blur(4px);
+        }
+        
+        #violationModal, #quizOffModal {
+            position: fixed; inset: 0; background: rgba(15, 23, 42, 0.65); 
+            z-index: 90; display: none; justify-content: center; align-items: center; padding: 1rem;
+            backdrop-filter: blur(6px);
+        }
+        .modal-content {
+            background: white; padding: 2.25rem; border-radius: 1.25rem; max-width: 92%; width: 440px; text-align: center;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+            animation: modalPop 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        @keyframes modalPop {
+            0% { opacity: 0; transform: scale(0.92); }
+            100% { opacity: 1; transform: scale(1); }
+        }
+
+        /* Loading Spinner Animation */
+        .spinner {
+            border: 4px solid rgba(226, 232, 240, 0.8);
+            width: 42px; height: 42px; border-radius: 50%; border-left-color: #3b82f6;
+            animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        /* Question Navigation Buttons */
+        .q-panel-btn {
+            width: 42px; 
+            height: 42px; 
+            display: flex; 
+            align-items: center; 
+            justify-content: center; 
+            font-weight: 700; 
+            border-radius: 0.6rem; 
+            transition: all 0.2s ease-in-out;
+            position: relative;
+            border: 2px solid transparent;
+            font-size: 0.95rem;
+        }
+        .q-panel-btn.unvisited { background-color: #f3f4f6; color: #6b7280; border-color: #e5e7eb; }
+        .q-panel-btn.viewed { background-color: #fef3c7; color: #92400e; border-color: #fde68a; }
+        .q-panel-btn.answered { background-color: #10b981; color: white; border-color: #059669; }
+        .q-panel-btn.current { 
+            background-color: #2563eb; 
+            color: white; 
+            border-color: #1d4ed8; 
+            box-shadow: 0 4px 10px rgba(37, 99, 235, 0.35);
+            transform: scale(1.05);
+        }
+        .q-panel-btn.current.flagged {
+            border-color: #dc2626; 
+            box-shadow: 0 4px 10px rgba(220, 38, 38, 0.4);
+        }
+        .q-panel-btn .flag-icon {
+            position: absolute;
+            top: -5px;
+            right: -5px;
+            color: #dc2626; 
+            font-size: 0.75rem;
+            background: white;
+            border-radius: 50%;
+            padding: 2px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+        }
+        .q-panel-btn:active { transform: scale(0.95); }
+
+        /* Print Engine Overrides */
+        @media print {
+            .no-print { display: none !important; }
+            body { background: white !important; color: black !important; }
+            #app { min-height: auto; margin: 0; padding: 0; }
+            .w-full.max-w-6xl { box-shadow: none !important; border: none !important; padding: 0 !important; }
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 font-sans antialiased selection:bg-blue-500 selection:text-white">
+
+    <div id="app"></div>
+
+    <!-- Processing Loader Overlay -->
+    <div id="loadingOverlay">
+        <div class="spinner mb-4"></div>
+        <p class="text-slate-700 font-semibold text-lg" id="loadingText">Processing request...</p>
+    </div>
+
+    <!-- Violation Warning Modal -->
+    <div id="violationModal" role="dialog" aria-modal="true">
+        <div class="modal-content">
+            <div class="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <i class="fas fa-exclamation-triangle text-amber-600 text-3xl"></i>
+            </div>
+            <div id="violationMessage" class="mb-6"></div>
+            <button id="modalConfirmBtn" class="w-full py-3.5 px-4 rounded-xl text-white font-bold transition duration-200 shadow-md flex items-center justify-center gap-2"></button>
+        </div>
+    </div>
+
+    <!-- Quiz Inactive Modal -->
+    <div id="quizOffModal" role="dialog" aria-modal="true">
+        <div class="modal-content">
+            <div class="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <i class="fas fa-lock text-red-600 text-3xl"></i>
+            </div>
+            <p class="text-2xl font-bold text-slate-900 mb-2">Exam Portal Closed</p>
+            <div id="quizOffMessage" class="mb-6 text-slate-600 text-sm leading-relaxed"></div>
+            <button id="quizOffConfirmBtn" class="w-full py-3 px-4 rounded-xl text-slate-700 font-bold bg-slate-200 hover:bg-slate-300 transition shadow-sm">
+                Close & Return
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // --- SUPABASE CONFIGURATION ---
+        const SUPABASE_URL = 'https://btrhdgvmygunupitiapf.supabase.co'; 
+        const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ0cmhkZ3ZteWd1bnVwaXRpYXBmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA3MzQxOTYsImV4cCI6MjA4NjMxMDE5Nn0.v7UXz7GvUSsknsbYM4a-uzNaHthgET_0X8-lavs9Krw';
+        
+        const SUPABASE_SUBMISSIONS_TABLE = 'quiz_submissions'; 
+        const SUPABASE_QUESTIONS_TABLE = 'quiz_questions';
+        const STATIC_QUIZ_UUID = '5f4b3d2c-1a0e-9f8d-7c6b-5a4e3d2c1b0a';
+        const SUPABASE_STATUS_TABLE = 'quiz_status'; 
+
+        // Initialize Supabase client safely
+        let client = null;
+        try {
+            if (typeof supabase !== 'undefined' && supabase.createClient) {
+                client = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+            }
+        } catch (err) {
+            console.warn("Supabase init warning:", err);
+        }
+
+        // --- FALLBACK QUESTION BANK (Used if remote fetch fails or times out) ---
+        const FALLBACK_QUESTIONS = [
+            {
+                question: "Which algorithm is commonly used for supervised classification tasks in Artificial Intelligence?",
+                options: ["Random Forest", "K-Means Clustering", "Apriori Algorithm", "DBSCAN"],
+                answer: "Random Forest"
+            },
+            {
+                question: "What does the 'GPT' in OpenAI's GPT models stand for?",
+                options: ["General Purpose Text", "Generative Pre-trained Transformer", "Global Processing Technology", "Guided Prediction System"],
+                answer: "Generative Pre-trained Transformer"
+            },
+            {
+                question: "In Machine Learning, what is overfitting?",
+                options: [
+                    "A model performing well on training data but poorly on unseen data",
+                    "A model performing poorly on both training and test data",
+                    "A model with insufficient parameters",
+                    "A training process that runs too quickly"
+                ],
+                answer: "A model performing well on training data but poorly on unseen data"
+            },
+            {
+                question: "Which of the following activation functions outputs values constrained between 0 and 1?",
+                options: ["ReLU", "Sigmoid", "Leaky ReLU", "Tanh"],
+                answer: "Sigmoid"
+            },
+            {
+                question: "What is the primary function of the Loss Function in Neural Network training?",
+                options: [
+                    "To calculate the prediction error and guide optimization",
+                    "To generate visual graphs of neural layers",
+                    "To compress training datasets",
+                    "To encrypt trained weights"
+                ],
+                answer: "To calculate the prediction error and guide optimization"
+            },
+            {
+                question: "Which architecture introduced the Attention Mechanism now central to modern LLMs?",
+                options: ["Transformer", "Convolutional Neural Network (CNN)", "Recurrent Neural Network (RNN)", "Boltzmann Machine"],
+                answer: "Transformer"
+            },
+            {
+                question: "In Python data science, which library is primarily used for tabular data manipulation?",
+                options: ["NumPy", "Pandas", "Matplotlib", "SciPy"],
+                answer: "Pandas"
+            },
+            {
+                question: "What is the process of adjusting model weights based on loss gradients called?",
+                options: ["Backpropagation", "Forward pass", "Dimensionality reduction", "Quantization"],
+                answer: "Backpropagation"
+            },
+            {
+                question: "Which evaluation metric measures the ratio of true positives to all positive predictions?",
+                options: ["Recall", "Precision", "Accuracy", "F1 Score"],
+                answer: "Precision"
+            },
+            {
+                question: "What technique reduces model memory footprint by converting 32-bit floats to 8-bit integers?",
+                options: ["Pruning", "Quantization", "Distillation", "Tokenization"],
+                answer: "Quantization"
+            }
+        ];
+
+        // Device & Platform Detection Helper
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+        const isAndroid = /Android/.test(navigator.userAgent);
+        const isMobileDevice = isIOS || isAndroid;
+
+        // --- QUIZ STATE ---
+        let quizQuestions = []; 
+        let studentInfo = {};
+        let currentQuestionIndex = 0;
+        let studentResponses = []; 
+        let questionStatus = []; // 0 = unvisited, 1 = viewed, 2 = answered
+        let questionFlags = [];  // true = flagged
+        let timerInterval = null;
+        
+        const TOTAL_QUIZ_TIME = 10 * 60; // 10 minutes (600s)
+        let timeLeft = TOTAL_QUIZ_TIME; 
+        let isTimerRunning = false; 
+        let isQuizSubmitted = false; 
+        let isProctoringActive = false;
+        let isModalOpen = false;
+
+        let questionTimings = [];
+        let currentQuestionStartTime = Date.now();
+
+        let isQuizActive = null; 
+        let isUsingFallbackQuestions = false;
+        
+        // Proctoring Counter
+        let proctoringViolations = { total: 0, windowSwitch: 0, copyPaste: 0 };
+        const MAX_VIOLATIONS = 3;
+        const WINDOW_SWITCH_COOLDOWN = 1200; // Cooldown between consecutive switch triggers
+        let violationCooldown = false; 
+
+        // Gesture Touch Coordinates Tracking
+        let touchStartX = 0;
+        let touchStartY = 0;
+        let touchStartTime = 0;
+
+        // DOM Element Cache
+        const APP_CONTAINER = document.getElementById('app');
+        const VIOLATION_MODAL = document.getElementById('violationModal');
+        const MODAL_CONFIRM_BTN = document.getElementById('modalConfirmBtn');
+        const VIOLATION_MESSAGE = document.getElementById('violationMessage');
+        const QUIZ_OFF_MODAL = document.getElementById('quizOffModal');
+        const QUIZ_OFF_CONFIRM_BTN = document.getElementById('quizOffConfirmBtn');
+        const LOADING_OVERLAY = document.getElementById('loadingOverlay');
+
+        function generateUUID() {
+            if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+                return crypto.randomUUID();
+            }
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                const r = Math.random() * 16 | 0;
+                const v = c === 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+
+        function shuffleArray(array) {
+            for (let i = array.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [array[i], array[j]] = [array[j], array[i]];
+            }
+        }
+
+        function formatTime(seconds) {
+            const min = Math.floor(Math.max(0, seconds) / 60);
+            const sec = Math.floor(Math.max(0, seconds) % 60);
+            return `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
+        }
+
+        function showLoading(text = 'Processing request...') {
+            document.getElementById('loadingText').textContent = text;
+            LOADING_OVERLAY.style.display = 'flex';
+        }
+
+        function hideLoading() {
+            LOADING_OVERLAY.style.display = 'none';
+        }
+
+        function setView(viewName) {
+            isModalOpen = false;
+            VIOLATION_MODAL.style.display = 'none';
+            QUIZ_OFF_MODAL.style.display = 'none'; 
+            hideLoading();
+
+            if (viewName !== 'quiz') {
+                disableProctoring();
+                stopTotalTimer();
+            }
+
+            APP_CONTAINER.innerHTML = '';
+
+            if (viewName === 'signin') renderSignIn();
+            else if (viewName === 'proctoringRules') renderProctoringRules(); 
+            else if (viewName === 'quiz') renderQuiz();
+            else if (viewName === 'admin') renderAdminLogin();
+            else if (viewName === 'leaderboard') renderLeaderboard(); 
+        }
+
+        function showQuizOffModal() {
+            isModalOpen = true;
+            const msg = document.getElementById('quizOffMessage');
+            if (msg) {
+                msg.innerHTML = "The quiz controller has <strong class='text-red-600 font-semibold'>disabled exam access</strong> at this moment.<br><br>Please contact your exam coordinator or try again later.";
+            }
+            QUIZ_OFF_MODAL.style.display = 'flex';
+        }
+
+        function showTempMessage(msg, isError = false) {
+            let tempDiv = document.getElementById('tempMessage');
+            if (!tempDiv) {
+                tempDiv = document.createElement('div');
+                tempDiv.id = 'tempMessage';
+                document.body.appendChild(tempDiv);
+            }
+            tempDiv.className = `fixed top-6 left-1/2 transform -translate-x-1/2 text-white px-6 py-3 rounded-xl shadow-2xl z-[120] transition-all duration-300 font-medium text-sm flex items-center gap-2 ${isError ? 'bg-red-600' : 'bg-emerald-600'}`;
+            tempDiv.innerHTML = `<i class="fas ${isError ? 'fa-exclamation-circle' : 'fa-check-circle'}"></i> <span>${msg}</span>`;
+            tempDiv.style.opacity = '1';
+            setTimeout(() => { 
+                tempDiv.style.opacity = '0';
+            }, 3500);
+        }
+
+        function saveResultLocally(name, email, admissionNo, score, totalQuestions, violations) {
+            const leaderboard = JSON.parse(localStorage.getItem('quizLeaderboard') || '[]');
+            const percentageVal = ((score / totalQuestions) * 100).toFixed(2);
+            const result = {
+                id: generateUUID(),
+                name, email, admissionNo, score, total: totalQuestions,
+                percentage: percentageVal,
+                violations: violations.total, 
+                windowSwitchViolations: violations.windowSwitch, 
+                copyPasteViolations: violations.copyPaste,
+                timestamp: new Date().toISOString()
+            };
+            leaderboard.push(result);
+            leaderboard.sort((a, b) => b.score - a.score || new Date(a.timestamp) - new Date(b.timestamp));
+            localStorage.setItem('quizLeaderboard', JSON.stringify(leaderboard));
+            return result; 
+        }
+
+        // Helper to race promise against network timeout
+        function withTimeout(promise, ms = 4000) {
+            return Promise.race([
+                promise,
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Network request timed out')), ms))
+            ]);
+        }
+
+        async function fetchQuizActiveStatus() {
+            try {
+                if (!client) throw new Error("Supabase client unavailable");
+
+                const { data, error } = await withTimeout(
+                    client.from(SUPABASE_STATUS_TABLE).select('is_active').limit(1).maybeSingle(),
+                    3000
+                );
+
+                if (error && error.code !== 'PGRST116') throw error; 
+                
+                isQuizActive = (data && data.is_active !== null) ? data.is_active : true; 
+                return isQuizActive;
+            } catch (e) {
+                console.warn('Fetch Quiz Status Exception (falling back to active):', e.message);
+                isQuizActive = true; 
+                return isQuizActive;
+            }
+        }
+
+        async function uploadResultToSupabase(resultData, detailedResponses, timeLeftSeconds) {
+            const submissionUUID = resultData.id || generateUUID(); 
+            const dataToInsert = {
+                student_id: submissionUUID,
+                quiz_id: STATIC_QUIZ_UUID,
+                score: resultData.score,
+                total_questions: resultData.total,
+                percentage: resultData.percentage.toString(), 
+                total_violations: resultData.violations,
+                window_switch_violations: resultData.windowSwitchViolations, 
+                copy_paste_violations: resultData.copyPasteViolations,
+                submission_time: new Date().toISOString(),
+                student_name: resultData.name,
+                college_email: resultData.email,
+                admission_no: resultData.admissionNo,
+                time_left_seconds: timeLeftSeconds,
+                student_responses_json: detailedResponses,
+            };
+
+            try {
+                if (!client) throw new Error("Supabase client unavailable");
+
+                const { error } = await withTimeout(
+                    client.from(SUPABASE_SUBMISSIONS_TABLE).insert([dataToInsert]),
+                    4000
+                ); 
+
+                if (error) throw error; 
+                return { success: true };
+            } catch (e) {
+                console.warn('Upload Exception (Saved to local storage):', e.message);
+                return { 
+                    success: false, 
+                    message: "Saved to local storage (Database connection unavailable)." 
+                };
+            }
+        }
+
+        async function fetchQuizQuestionsFromSupabase() {
+            showLoading('Loading exam questions...');
+            isUsingFallbackQuestions = false;
+
+            try {
+                if (!client) throw new Error("Supabase client not initialized");
+
+                const { data, error } = await withTimeout(
+                    client.from(SUPABASE_QUESTIONS_TABLE).select('question, answer, option_a, option_b, option_c, option_d'),
+                    3500
+                );
+                
+                if (error) throw error;
+
+                if (!data || data.length === 0) {
+                    throw new Error("No remote questions returned from table");
+                }
+
+                quizQuestions = data.map(q => ({
+                    question: q.question,
+                    options: [q.option_a, q.option_b, q.option_c, q.option_d],
+                    answer: q.answer
+                }));
+                
+            } catch (e) {
+                console.warn('Supabase fetch failed or timed out. Switching to offline questions:', e.message);
+                isUsingFallbackQuestions = true;
+                quizQuestions = JSON.parse(JSON.stringify(FALLBACK_QUESTIONS));
+                showTempMessage("Offline question bank loaded (Network unreachable)", false);
+            } finally {
+                studentResponses = Array(quizQuestions.length).fill(null);
+                questionStatus = Array(quizQuestions.length).fill(0);
+                questionFlags = Array(quizQuestions.length).fill(false);
+                hideLoading();
+            }
+
+            return true;
+        }
+
+        function canFullscreen() {
+            return !!(document.documentElement.requestFullscreen || 
+                      document.documentElement.webkitRequestFullscreen || 
+                      document.documentElement.mozRequestFullScreen || 
+                      document.documentElement.msRequestFullscreen);
+        }
+
+        function requestFullScreen() {
+            if (!canFullscreen()) return Promise.resolve(); // Safe fallback for iOS iPhones
+            
+            const element = document.documentElement;
+            const requestMethod = element.requestFullscreen || 
+                                  element.webkitRequestFullscreen || 
+                                  element.mozRequestFullScreen || 
+                                  element.msRequestFullscreen;
+
+            if (requestMethod) {
+                return requestMethod.call(element).catch(e => {
+                    console.warn("Fullscreen request not allowed or dismissed by user:", e);
+                });
+            }
+            return Promise.resolve();
+        }
+
+        function exitFullScreen() {
+            if (!canFullscreen()) return;
+            if (document.exitFullscreen && document.fullscreenElement) {
+                document.exitFullscreen().catch(e => console.warn("Fullscreen exit warning:", e));
+            } else if (document.webkitExitFullscreen && document.webkitFullscreenElement) {
+                document.webkitExitFullscreen();
+            }
+        }
+        
+        function showViolationModal(isTerminating, reason) {
+            if (isQuizSubmitted) return; 
+
+            isModalOpen = true;
+
+            if (isTerminating) {
+                VIOLATION_MESSAGE.innerHTML = `
+                    <p class="text-red-600 font-extrabold mb-2 text-xl">EXAM TERMINATED</p>
+                    <p class="text-slate-600 text-sm">You exceeded the limit of <strong>${MAX_VIOLATIONS} violations</strong>. Your answers are being finalized and submitted.</p>
+                `;
+                MODAL_CONFIRM_BTN.innerHTML = `<i class="fas fa-paper-plane"></i> Submit Exam Now`;
+                MODAL_CONFIRM_BTN.className = "w-full py-3.5 px-4 rounded-xl text-white font-bold bg-red-600 hover:bg-red-700 transition shadow-lg flex items-center justify-center gap-2";
+                
+                stopTotalTimer(); 
+                disableProctoring(); 
+                exitFullScreen();
+                
+                MODAL_CONFIRM_BTN.onclick = () => {
+                    isModalOpen = false;
+                    VIOLATION_MODAL.style.display = 'none';
+                    calculateAndShowResults(true); 
+                };
+            } else {
+                let detailMsg = "Unfocused or forbidden app activity detected.";
+                if (reason === 'swipedown') detailMsg = "Avoid swiping from the top screen edge (Notification / Quick Settings).";
+                else if (reason === 'swipeleft' || reason === 'swiperight') detailMsg = "Avoid edge swipes (Browser back/forward navigation).";
+                else if (reason === 'swipeup') detailMsg = "Avoid swiping up from the bottom screen edge (Home bar / App Switcher).";
+                else if (reason === 'blur' || reason === 'visibility') detailMsg = "App switched, browser minimized, or screen lost focus.";
+                else if (reason === 'copypaste') detailMsg = "Copying, cutting, or pasting content is strictly prohibited.";
+                else if (reason === 'screenshot') detailMsg = "Screenshot attempt detected."; 
+
+                VIOLATION_MESSAGE.innerHTML = `
+                    <p class="text-lg font-bold text-slate-800 mb-2">⚠️ ${detailMsg}</p>
+                    <p class="text-xs text-slate-500 mb-4">Please remain on this page during the active examination.</p>
+                    <div class="p-3 bg-red-50 rounded-xl border border-red-100">
+                        <p class="font-bold text-red-600 text-sm">Violation ${proctoringViolations.total} of ${MAX_VIOLATIONS}</p>
+                    </div>
+                `;
+                
+                MODAL_CONFIRM_BTN.innerHTML = `<i class="fas fa-play"></i> Resume Quiz`;
+                MODAL_CONFIRM_BTN.className = "w-full py-3.5 px-4 rounded-xl text-white font-bold bg-amber-600 hover:bg-amber-700 transition shadow-md flex items-center justify-center gap-2";
+                
+                MODAL_CONFIRM_BTN.onclick = () => {
+                    isModalOpen = false;
+                    VIOLATION_MODAL.style.display = 'none';
+                    requestFullScreen(); 
+                };
+            }
+            VIOLATION_MODAL.style.display = 'flex';
+        }
+
+        function handleProctoringViolation(type, reason) {
+            if (isQuizSubmitted || isModalOpen || !isProctoringActive) return; 
+            if (currentQuestionIndex >= quizQuestions.length) return; 
+            
+            if (proctoringViolations.total >= MAX_VIOLATIONS) return; 
+            
+            if (type === 'windowSwitch') {
+                if (violationCooldown) return; 
+                proctoringViolations.windowSwitch++; 
+                violationCooldown = true;
+                setTimeout(() => { violationCooldown = false; }, WINDOW_SWITCH_COOLDOWN); 
+            } 
+            else if (type === 'copyPaste') {
+                proctoringViolations.copyPaste++;
+            }
+            else return; 
+            
+            proctoringViolations.total++;
+
+            const vDisplay = document.getElementById('violationCountDisplay');
+            if (vDisplay) vDisplay.innerHTML = `⚠️ Violations: ${proctoringViolations.total} / ${MAX_VIOLATIONS}`;
+
+            if (proctoringViolations.total >= MAX_VIOLATIONS) {
+                disableProctoring(); 
+                showViolationModal(true, reason); 
+            } else {
+                showViolationModal(false, reason); 
+            }
+        }
+        
+        // Mobile Smart Visibility & Focus Handler
+        const visibilityChangeHandler = () => { 
+            if (!isProctoringActive || isQuizSubmitted || isModalOpen) return;
+
+            if (document.hidden || document.visibilityState === 'hidden') {
+                handleProctoringViolation('windowSwitch', 'visibility'); 
+            }
+        };
+
+        const pageHideHandler = () => {
+            if (!isProctoringActive || isQuizSubmitted || isModalOpen) return;
+            handleProctoringViolation('windowSwitch', 'visibility');
+        };
+        
+        const windowBlurHandler = () => { 
+            if (!isProctoringActive || isQuizSubmitted || isModalOpen || violationCooldown) return;
+            
+            if (isMobileDevice) {
+                setTimeout(() => {
+                    if ((document.hidden || !document.hasFocus()) && !isModalOpen) {
+                        handleProctoringViolation('windowSwitch', 'blur');
+                    }
+                }, 300);
+            } else {
+                if (!document.hasFocus()) {
+                    handleProctoringViolation('windowSwitch', 'blur'); 
+                }
+            }
+        };
+
+        // Precise Gesture Vector Detection
+        const touchStartHandler = (e) => {
+            if (!isProctoringActive || isQuizSubmitted || isModalOpen) return;
+            if (e.touches && e.touches.length > 0) {
+                touchStartX = e.touches[0].clientX;
+                touchStartY = e.touches[0].clientY;
+                touchStartTime = Date.now();
+            }
+        };
+
+        const touchEndHandler = (e) => {
+            if (!isProctoringActive || isQuizSubmitted || isModalOpen) return;
+            if (!e.changedTouches || e.changedTouches.length === 0) return;
+
+            const touchEndX = e.changedTouches[0].clientX;
+            const touchEndY = e.changedTouches[0].clientY;
+            const deltaX = touchEndX - touchStartX;
+            const deltaY = touchEndY - touchStartY;
+            const timeDiff = Date.now() - touchStartTime;
+
+            const screenWidth = window.innerWidth;
+            const screenHeight = window.innerHeight;
+            const EDGE_THRESHOLD = 30; // Swipe origin distance from edge
+            const MIN_SWIPE_DIST = 50;  // Minimum gesture drag distance
+
+            if (timeDiff < 800) { // Fast swipe gesture
+                let reason = null;
+
+                if (touchStartY < EDGE_THRESHOLD && deltaY > MIN_SWIPE_DIST) reason = 'swipedown';
+                else if (touchStartY > screenHeight - EDGE_THRESHOLD && deltaY < -MIN_SWIPE_DIST) reason = 'swipeup';
+                else if (touchStartX < EDGE_THRESHOLD && deltaX > MIN_SWIPE_DIST) reason = 'swipeleft';
+                else if (touchStartX > screenWidth - EDGE_THRESHOLD && deltaX < -MIN_SWIPE_DIST) reason = 'swiperight';
+
+                if (reason) {
+                    handleProctoringViolation('windowSwitch', reason);
+                }
+            }
+        };
+        
+        const copyCutPasteHandler = (e) => {
+            if (!isProctoringActive || isQuizSubmitted) return;
+            e.preventDefault();
+            showTempMessage('Copying/Pasting content is disabled during exam.', true); 
+            handleProctoringViolation('copyPaste', 'copypaste');
+        };
+
+        const screenshotKeyHandler = (e) => {
+            if (!isProctoringActive || isQuizSubmitted) return;
+            if (e.key === 'PrintScreen' || e.keyCode === 44 || (e.ctrlKey && e.key === 'p')) {
+                e.preventDefault(); 
+                showTempMessage('Screenshot/Print attempt detected.', true); 
+                handleProctoringViolation('copyPaste', 'screenshot');
+            } 
+        };
+
+        function enableProctoring() {
+            if (isProctoringActive) return;
+            isProctoringActive = true;
+
+            document.addEventListener('visibilitychange', visibilityChangeHandler);
+            window.addEventListener('pagehide', pageHideHandler);
+            window.addEventListener('blur', windowBlurHandler); 
+            document.addEventListener('touchstart', touchStartHandler, { passive: true });
+            document.addEventListener('touchend', touchEndHandler, { passive: true });
+            document.addEventListener('copy', copyCutPasteHandler);
+            document.addEventListener('cut', copyCutPasteHandler);
+            document.addEventListener('paste', copyCutPasteHandler);
+            document.addEventListener('contextmenu', event => event.preventDefault());
+            document.addEventListener('keydown', screenshotKeyHandler); 
+        }
+
+        function disableProctoring() {
+            isProctoringActive = false;
+
+            document.removeEventListener('visibilitychange', visibilityChangeHandler);
+            window.removeEventListener('pagehide', pageHideHandler);
+            window.removeEventListener('blur', windowBlurHandler);
+            document.removeEventListener('touchstart', touchStartHandler);
+            document.removeEventListener('touchend', touchEndHandler);
+            document.removeEventListener('copy', copyCutPasteHandler);
+            document.removeEventListener('cut', copyCutPasteHandler);
+            document.removeEventListener('paste', copyCutPasteHandler);
+            document.removeEventListener('keydown', screenshotKeyHandler); 
+        }
+
+        function updateTimerDisplay() {
+            const progressBar = document.getElementById('progressBar');
+            const countdownTimer = document.getElementById('countdownValue'); 
+
+            if (progressBar) progressBar.style.width = Math.max(0, (timeLeft / TOTAL_QUIZ_TIME) * 100) + '%';
+            if (countdownTimer) countdownTimer.textContent = formatTime(timeLeft);
+        }
+
+        function startTotalTimer() {
+            if (isTimerRunning) return; 
+
+            isTimerRunning = true;
+            updateTimerDisplay();
+            timerInterval = setInterval(() => {
+                timeLeft--;
+                updateTimerDisplay();
+
+                if (timeLeft <= 0) {
+                    isQuizSubmitted = true; 
+                    stopTotalTimer();
+                    disableProctoring();
+                    exitFullScreen();
+                    calculateAndShowResults(true); 
+                }
+            }, 1000);
+        }
+
+        function stopTotalTimer() { 
+            if (timerInterval) clearInterval(timerInterval); 
+            isTimerRunning = false;
+        }
+
+        function jumpToQuestion(index) {
+            if (index >= 0 && index < quizQuestions.length) {
+                const timeSpent = Math.max(0, Math.floor((Date.now() - currentQuestionStartTime) / 1000));
+                
+                if (currentQuestionIndex < quizQuestions.length) {
+                    questionTimings[currentQuestionIndex] = (questionTimings[currentQuestionIndex] || 0) + timeSpent;
+                }
+                
+                currentQuestionIndex = index;
+                currentQuestionStartTime = Date.now();
+
+                if (questionStatus[currentQuestionIndex] === 0) {
+                    questionStatus[currentQuestionIndex] = 1; // Viewed
+                }
+                
+                renderQuizQuestion();
+                renderQuestionPanel(); 
+            }
+        }
+        
+        function navigateQuestions(direction) {
+            const newIndex = currentQuestionIndex + direction;
+            if (newIndex >= 0 && newIndex < quizQuestions.length) {
+                jumpToQuestion(newIndex);
+            }
+        }
+        
+        function saveCurrentAnswer(value) {
+            studentResponses[currentQuestionIndex] = value;
+            questionStatus[currentQuestionIndex] = 2; // Answered
+            renderQuestionPanel(); 
+        }
+        
+        function toggleFlag() {
+            questionFlags[currentQuestionIndex] = !questionFlags[currentQuestionIndex];
+            const msg = questionFlags[currentQuestionIndex] ? 'Question flagged for review' : 'Flag removed';
+            showTempMessage(msg); 
+            renderQuizQuestion(); 
+            renderQuestionPanel(); 
+        }
+
+        async function renderSignIn() {
+            APP_CONTAINER.className = "flex items-center justify-center min-h-screen p-4 bg-slate-100";
+            APP_CONTAINER.innerHTML = `
+                <div class="w-full max-w-md bg-white rounded-2xl shadow-xl border border-slate-200/80 p-8 transition-all">
+                    <div class="text-center mb-8">
+                        <div class="w-14 h-14 bg-blue-100 text-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-3 text-2xl shadow-inner">
+                            <i class="fas fa-user-graduate"></i>
+                        </div>
+                        <h2 class="text-3xl font-extrabold text-slate-900 tracking-tight">Quiz Portal</h2>
+                        <p class="text-slate-500 text-sm mt-1">Please sign in with your student credentials</p>
+                    </div>
+                    
+                    <div id="loadingQuestionsIndicator" class="text-center p-4 bg-blue-50/80 rounded-xl border border-blue-100 mb-6">
+                        <div class="spinner mx-auto mb-2"></div>
+                        <p class="text-xs font-semibold text-blue-700">Connecting to examination database...</p>
+                    </div>
+                    
+                    <form id="signInForm" class="space-y-4">
+                        <div>
+                            <label class="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">Full Name</label>
+                            <input type="text" id="studentName" required placeholder="John Doe" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-slate-800 outline-none transition text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">College Email</label>
+                            <input type="email" id="collegeEmail" required placeholder="student@glbimr.org" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-slate-800 outline-none transition text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">Admission No.</label>
+                            <input type="text" id="admissionNo" required placeholder="ADM-2026-XXXX" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-slate-800 outline-none transition text-sm">
+                        </div>
+                        <button type="submit" id="startQuizBtn" class="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl transition duration-200 shadow-md shadow-blue-500/20 mt-6 text-sm flex items-center justify-center gap-2" disabled>
+                            Start Quiz
+                        </button>
+                        
+                        <button type="button" id="adminSignInButton" class="w-full py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition text-xs mt-2 flex items-center justify-center gap-2">
+                            <i class="fas fa-lock text-slate-500"></i> Admin Access
+                        </button>
+                    </form>
+                </div>`;
+
+            const startQuizBtn = document.getElementById('startQuizBtn');
+            const loadingIndicator = document.getElementById('loadingQuestionsIndicator');
+
+            await fetchQuizQuestionsFromSupabase(); 
+            if (loadingIndicator) loadingIndicator.style.display = 'none';
+
+            startQuizBtn.disabled = false;
+            const modeTag = isUsingFallbackQuestions ? ' (Offline Mode)' : '';
+            startQuizBtn.innerHTML = `Continue to Proctoring Rules (${quizQuestions.length} Questions)${modeTag} <i class="fas fa-arrow-right"></i>`;
+
+            document.getElementById('signInForm').addEventListener('submit', function(e) { 
+                e.preventDefault();
+                
+                const emailInput = document.getElementById('collegeEmail'); 
+                const requiredDomain = '@glbimr.org'; 
+
+                studentInfo = {
+                    name: document.getElementById('studentName').value.trim(),
+                    email: emailInput.value.trim().toLowerCase(), 
+                    admissionNo: document.getElementById('admissionNo').value.trim()
+                };
+
+                if (!studentInfo.email.endsWith(requiredDomain)) {
+                    showTempMessage(`Domain restricted. Email must end with ${requiredDomain}`, true);
+                    emailInput.focus(); 
+                    return; 
+                }
+
+                setView('proctoringRules');
+            });
+            
+            document.getElementById('adminSignInButton').onclick = () => setView('admin');
+        }
+
+        function renderProctoringRules() {
+            APP_CONTAINER.className = "flex items-center justify-center min-h-screen p-4 bg-slate-100";
+            APP_CONTAINER.innerHTML = `
+                <div class="w-full max-w-lg bg-white rounded-2xl shadow-xl border border-slate-200/80 p-8">
+                    <div class="text-center mb-6">
+                        <div class="w-14 h-14 bg-amber-100 text-amber-600 rounded-2xl flex items-center justify-center mx-auto mb-3 text-2xl">
+                            <i class="fas fa-shield-halved"></i>
+                        </div>
+                        <h2 class="text-2xl font-extrabold text-slate-900">Examination Rules</h2>
+                        <p class="text-slate-500 text-xs mt-1">Review proctoring integrity constraints before starting</p>
+                    </div>
+                    
+                    <div class="p-5 bg-amber-50/80 border border-amber-200/80 rounded-xl mb-6">
+                        <p class="font-bold text-amber-900 text-sm mb-3 flex items-center gap-2">
+                            <i class="fas fa-triangle-exclamation text-amber-600"></i> Strict Proctoring Protocol:
+                        </p>
+                        <ul class="list-disc ml-5 space-y-2 text-xs text-amber-950 font-medium leading-relaxed">
+                            <li>App switching, tab changing, or minimizing browser will record violations.</li>
+                            <li>Mobile swiping gestures near edge controls are monitored.</li>
+                            <li>Copying, cutting, or screenshot attempts are disabled and logged.</li>
+                            <li>Maximum allowable warnings before automated exam termination: <strong>${MAX_VIOLATIONS}</strong></li>
+                        </ul>
+                    </div>
+
+                    <div class="flex items-center gap-3 p-3 bg-slate-50 rounded-xl border border-slate-200 mb-6">
+                        <input type="checkbox" id="rulesCheckbox" class="h-5 w-5 text-blue-600 border-slate-300 rounded focus:ring-blue-500 cursor-pointer">
+                        <label for="rulesCheckbox" class="text-xs font-semibold text-slate-700 cursor-pointer select-none">
+                            I understand and agree to adhere to all exam integrity guidelines.
+                        </label>
+                    </div>
+
+                    <button id="agreeAndStartBtn" class="w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl transition duration-200 shadow-md text-sm flex items-center justify-center gap-2" disabled>
+                        Agree & Begin Examination
+                    </button>
+                    <button id="cancelBtn" class="w-full py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold rounded-xl transition text-xs mt-2">
+                        Cancel & Return
+                    </button>
+                </div>
+            `;
+            
+            const checkbox = document.getElementById('rulesCheckbox');
+            const startBtn = document.getElementById('agreeAndStartBtn');
+            const cancelBtn = document.getElementById('cancelBtn');
+
+            checkbox.onchange = () => { startBtn.disabled = !checkbox.checked; };
+            cancelBtn.onclick = () => setView('signin');
+
+            startBtn.onclick = async () => {
+                startBtn.disabled = true; 
+                startBtn.innerHTML = `<div class="spinner !w-5 !h-5 !border-2"></div> Checking status...`;
+                
+                const currentStatus = await fetchQuizActiveStatus(); 
+                
+                if (!currentStatus) { 
+                    showQuizOffModal(); 
+                    startBtn.innerHTML = `Agree & Begin Examination`;
+                    startBtn.disabled = false; 
+                    return; 
+                }
+                
+                shuffleArray(quizQuestions); 
+                requestFullScreen();
+                enableProctoring();
+                
+                if (quizQuestions.length > 0) {
+                     questionStatus[0] = 1;
+                }
+
+                questionTimings = Array(quizQuestions.length).fill(0);
+                currentQuestionStartTime = Date.now();
+
+                setView('quiz');
+            };
+        }
+
+        function renderQuiz() {
+            APP_CONTAINER.className = "flex items-start justify-center min-h-screen p-4 bg-slate-100";
+            APP_CONTAINER.innerHTML = `
+                <div class="w-full max-w-6xl grid grid-cols-1 lg:grid-cols-4 gap-6 mt-4 mb-8">
+                    <!-- Question Main Panel -->
+                    <div class="lg:col-span-3 bg-white rounded-2xl shadow-xl border border-slate-200/80 p-6 md:p-8 relative">
+                        <div class="mb-4 flex flex-wrap justify-between items-center gap-2">
+                            <h2 class="text-xl font-bold text-slate-800">
+                                Question <span id="questionNumberDisplay" class="text-blue-600 font-extrabold">1</span> of ${quizQuestions.length}
+                            </h2>
+                            <button id="flagButton" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold border transition shadow-sm flex items-center gap-2"></button>
+                        </div>
+                        <div id="progressBarContainer"><div id="progressBar"></div></div>
+                        <div id="quizContent"></div>
+                    </div>
+
+                    <!-- Navigation Sidebar -->
+                    <div class="lg:col-span-1 bg-white rounded-2xl shadow-xl border border-slate-200/80 p-6 sticky top-4 self-start">
+                        <div id="countdownTimer">Time Remaining: <span id="countdownValue" class="font-mono font-extrabold">${formatTime(timeLeft)}</span></div>
+                        
+                        <h3 class="text-sm font-bold text-slate-800 uppercase tracking-wider mb-3 mt-4">Question Overview</h3>
+                        <div id="questionPanel" class="grid grid-cols-5 gap-2 max-h-[320px] overflow-y-auto p-1"></div>
+                        
+                        <div class="mt-6 pt-4 border-t border-slate-100">
+                            <p id="violationCountDisplay" class="text-xs text-center text-slate-500 font-mono font-medium">
+                                ⚠️ Violations: ${proctoringViolations.total} / ${MAX_VIOLATIONS}
+                            </p>
+                        </div>
+                    </div>
+                </div>`;
+                
+            startTotalTimer(); 
+            renderQuizQuestion();
+            renderQuestionPanel();
+            
+            const flagButton = document.getElementById('flagButton');
+            if (flagButton) flagButton.onclick = toggleFlag;
+        }
+
+        function renderQuestionPanel() {
+            const panel = document.getElementById('questionPanel');
+            if (!panel) return;
+            
+            panel.innerHTML = quizQuestions.map((q, index) => {
+                const status = questionStatus[index]; 
+                const isFlagged = questionFlags[index];
+                
+                let statusClass = 'unvisited'; 
+                if (status === 1) statusClass = 'viewed'; 
+                if (status === 2) statusClass = 'answered'; 
+                
+                if (index === currentQuestionIndex) statusClass = 'current'; 
+
+                return `
+                    <button class="q-panel-btn ${statusClass} ${isFlagged ? 'flagged' : ''}" onclick="jumpToQuestion(${index})">
+                        ${index + 1}
+                        ${isFlagged ? '<i class="fas fa-flag flag-icon"></i>' : ''}
+                    </button>
+                `;
+            }).join('');
+        }
+
+        function renderQuizQuestion() {
+            const q = quizQuestions[currentQuestionIndex];
+            const quizContent = document.getElementById('quizContent');
+            const qNumDisplay = document.getElementById('questionNumberDisplay');
+            const flagButton = document.getElementById('flagButton'); 
+
+            if (qNumDisplay) qNumDisplay.textContent = currentQuestionIndex + 1;
+
+            const optionsToRender = [...q.options];
+            
+            const isFirst = currentQuestionIndex === 0;
+            const isLast = currentQuestionIndex === quizQuestions.length - 1;
+            const isFlagged = questionFlags[currentQuestionIndex];
+            
+            if (flagButton) {
+                if (isFlagged) {
+                    flagButton.innerHTML = `<i class="fas fa-flag text-red-600"></i> Flagged`;
+                    flagButton.className = "px-3.5 py-1.5 rounded-xl text-xs font-semibold transition bg-red-50 text-red-700 border-red-200 hover:bg-red-100";
+                } else {
+                    flagButton.innerHTML = `<i class="far fa-flag text-slate-500"></i> Flag for Review`;
+                    flagButton.className = "px-3.5 py-1.5 rounded-xl text-xs font-semibold transition bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100";
+                }
+            }
+
+            const studentInfoBlock = `
+                <div class="p-3 bg-slate-50 rounded-xl border border-slate-200/80 mb-6 text-xs flex flex-wrap justify-between items-center gap-2">
+                    <div><span class="font-bold text-slate-500">Student:</span> <span class="font-semibold text-slate-800">${studentInfo.name || 'N/A'}</span></div>
+                    <div><span class="font-bold text-slate-500">Admission No:</span> <span class="font-semibold text-slate-800">${studentInfo.admissionNo || 'N/A'}</span></div>
+                </div>
+            `;
+
+            quizContent.innerHTML = `
+                ${studentInfoBlock}
+                <div class="mb-6">
+                    <h3 class="text-lg md:text-xl font-bold text-slate-900 leading-snug">${q.question}</h3>
+                </div>
+                
+                <div class="space-y-3" id="optionsContainer">
+                    ${optionsToRender.map(opt => `
+                        <label class="flex items-center p-4 border border-slate-200 rounded-xl cursor-pointer hover:bg-blue-50/50 hover:border-blue-300 transition text-sm">
+                            <input type="radio" name="answer" value="${opt}" class="h-4 w-4 text-blue-600 focus:ring-blue-500" ${studentResponses[currentQuestionIndex] === opt ? 'checked' : ''}>
+                            <span class="ml-3 text-slate-800 select-none font-medium">${opt}</span>
+                        </label>`).join('')}
+                </div>
+                
+                <div class="flex justify-between items-center mt-8 pt-4 border-t border-slate-100">
+                    <button id="prevButton" class="px-5 py-2.5 bg-slate-500 hover:bg-slate-600 text-white rounded-xl font-semibold text-xs transition shadow-sm flex items-center gap-2 ${isFirst ? 'opacity-40 cursor-not-allowed' : ''}" ${isFirst ? 'disabled' : ''}>
+                        <i class="fas fa-arrow-left"></i> Previous
+                    </button>
+                    
+                    <button id="nextButton" class="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-semibold text-xs transition shadow-sm flex items-center gap-2 ${isLast ? 'hidden' : ''}">
+                        Next <i class="fas fa-arrow-right"></i>
+                    </button>
+
+                    <button id="submitButton" class="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-semibold text-xs transition shadow-sm flex items-center gap-2 ${isLast ? '' : 'hidden'}">
+                        <i class="fas fa-paper-plane"></i> Finalize & Submit
+                    </button>
+                </div>
+            `;
+
+            document.getElementById('optionsContainer').onchange = (e) => {
+                if (e.target.name === 'answer') saveCurrentAnswer(e.target.value);
+            };
+
+            document.getElementById('prevButton').onclick = () => navigateQuestions(-1);
+            document.getElementById('nextButton').onclick = () => navigateQuestions(1);
+
+            if (document.getElementById('submitButton')) {
+                 document.getElementById('submitButton').onclick = () => {
+                    isQuizSubmitted = true; 
+                    stopTotalTimer();
+                    disableProctoring();
+                    exitFullScreen();
+                    calculateAndShowResults(false);
+                };
+            }
+            
+            renderQuestionPanel(); 
+        }
+
+        async function calculateAndShowResults(wasTerminated) {
+            showLoading('Calculating score and submitting result...');
+            
+            const timeSpentFinal = Math.max(0, Math.floor((Date.now() - currentQuestionStartTime) / 1000));
+            if (currentQuestionIndex < quizQuestions.length) {
+                questionTimings[currentQuestionIndex] = (questionTimings[currentQuestionIndex] || 0) + timeSpentFinal;
+            }
+            
+            let score = 0;
+            quizQuestions.forEach((q, idx) => { if (studentResponses[idx] === q.answer) score++; });
+            
+            const detailedResponses = quizQuestions.map((q, idx) => ({
+                question_number: idx + 1,
+                question_text: q.question, 
+                student_response: studentResponses[idx],
+                correct_answer: q.answer,
+                is_correct: studentResponses[idx] === q.answer,
+                time_spent_seconds: questionTimings[idx] || 0 
+            }));
+
+            const result = saveResultLocally(studentInfo.name, studentInfo.email, studentInfo.admissionNo, score, quizQuestions.length, proctoringViolations);
+            const uploadStatus = await uploadResultToSupabase(result, detailedResponses, timeLeft);
+            
+            hideLoading();
+            renderFinalScreen(score, wasTerminated, uploadStatus);
+        }
+
+        function renderFinalScreen(score, wasTerminated, uploadStatus) {
+            const statusClass = uploadStatus.success ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-800 border-amber-200';
+            const statusIcon = uploadStatus.success ? 'fa-check-circle text-emerald-600' : 'fa-info-circle text-amber-600';
+            const statusMsg = uploadStatus.success ? 'Result Stored in Remote Database' : 'Saved to Local Storage';
+            const errorDetail = uploadStatus.success ? '' : `<p class="text-xs mt-1 text-amber-700 font-medium">${uploadStatus.message}</p>`;
+
+            const mainIconHtml = wasTerminated ? `
+                <div class="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <i class="fas fa-triangle-exclamation text-3xl text-red-600"></i>
+                </div>
+            ` : `
+                <div class="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <i class="fas fa-circle-check text-3xl text-emerald-600"></i>
+                </div>
+            `;
+
+            APP_CONTAINER.className = "flex items-center justify-center min-h-screen p-4 bg-slate-100";
+            APP_CONTAINER.innerHTML = `
+                <div class="w-full max-w-lg bg-white rounded-2xl shadow-xl border border-slate-200/80 p-8 text-center">
+                    ${mainIconHtml}
+                    <h2 class="text-2xl font-extrabold text-slate-900 mb-1">${wasTerminated ? 'Exam Terminated' : 'Quiz Completed'}</h2>
+                    <p class="text-xs text-slate-500 mb-6">Thank you for completing your examination.</p>
+
+                    <div class="p-3.5 rounded-xl border ${statusClass} text-xs mb-6 flex flex-col items-center justify-center">
+                        <div class="flex items-center gap-2 font-bold">
+                            <i class="fas ${statusIcon}"></i> <span>${statusMsg}</span>
+                        </div>
+                        ${errorDetail}
+                    </div>
+
+                    <div class="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6 text-left space-y-1 text-xs">
+                        <p><span class="font-bold text-slate-500">Student Name:</span> <span class="font-bold text-slate-900">${studentInfo.name}</span></p>
+                        <p><span class="font-bold text-slate-500">Admission No:</span> <span class="font-mono font-bold text-slate-900">${studentInfo.admissionNo}</span></p>
+                    </div>
+
+                    <div class="bg-blue-50/80 border border-blue-100 p-5 rounded-xl mb-6 text-left">
+                        <div class="flex justify-between items-center mb-3">
+                            <span class="text-sm font-bold text-blue-900">Final Score:</span>
+                            <span class="text-xl font-extrabold text-blue-700">${score} / ${quizQuestions.length}</span>
+                        </div>
+                        <div class="border-t border-blue-200/60 pt-3 space-y-1 text-xs text-blue-950">
+                            <div class="flex justify-between font-bold">
+                                <span>Recorded Violations:</span>
+                                <span class="${proctoringViolations.total > 0 ? 'text-red-600' : 'text-emerald-600'}">${proctoringViolations.total}</span>
+                            </div>
+                            <div class="flex justify-between text-slate-600">
+                                <span>Focus Loss / Swipes:</span>
+                                <span class="font-bold">${proctoringViolations.windowSwitch}</span>
+                            </div>
+                            <div class="flex justify-between text-slate-600">
+                                <span>Copy-Paste / Screenshots:</span>
+                                <span class="font-bold">${proctoringViolations.copyPaste}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <button onclick="window.location.reload()" class="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl transition shadow-md text-sm">
+                        Return to Portal Sign-In
+                    </button>
+                </div>
+            `;
+        }
+
+        function renderAdminLogin() {
+            APP_CONTAINER.className = "flex items-center justify-center min-h-screen p-4 bg-slate-100";
+            APP_CONTAINER.innerHTML = `
+                <div class="w-full max-w-sm bg-white rounded-2xl shadow-xl border border-slate-200/80 p-8">
+                    <div class="text-center mb-6">
+                        <div class="w-12 h-12 bg-red-100 text-red-600 rounded-xl flex items-center justify-center mx-auto mb-2 text-xl">
+                            <i class="fas fa-user-shield"></i>
+                        </div>
+                        <h2 class="text-xl font-bold text-slate-900">Admin Panel Login</h2>
+                    </div>
+                    <form id="adminLoginForm" class="space-y-4">
+                        <input type="text" id="adminId" placeholder="Admin Username" required class="w-full px-4 py-2.5 border rounded-xl text-sm outline-none focus:ring-2 focus:ring-red-500">
+                        <input type="password" id="adminPassword" placeholder="Password" required class="w-full px-4 py-2.5 border rounded-xl text-sm outline-none focus:ring-2 focus:ring-red-500">
+                        <button type="submit" class="w-full py-3 bg-red-600 hover:bg-red-700 text-white font-bold rounded-xl text-sm transition shadow-md">Authenticate</button>
+                        <button type="button" onclick="setView('signin')" class="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold rounded-xl text-xs transition">Cancel</button>
+                    </form>
+                </div>`;
+            
+            document.getElementById('adminLoginForm').onsubmit = async (e) => {
+                e.preventDefault();
+                const adminId = document.getElementById('adminId').value;
+                const adminPassword = document.getElementById('adminPassword').value;
+                
+                try {
+                    let isAuthenticated = false;
+                    
+                    if (client) {
+                        const { data, error } = await withTimeout(
+                            client.rpc('verify_admin_credentials', { input_id: adminId, input_password: adminPassword }),
+                            3000
+                        ).catch(() => ({ data: null }));
+
+                        if (data === true) isAuthenticated = true;
+                    }
+
+                    // Fallback passkey for offline admin demonstration
+                    if (!isAuthenticated && (adminId === 'admin' && adminPassword === 'admin123')) {
+                        isAuthenticated = true;
+                    }
+
+                    if (isAuthenticated) {
+                        setView('leaderboard');
+                    } else {
+                        showTempMessage('Invalid admin credentials', true);
+                    }
+                } catch (e) {
+                    showTempMessage('Error connecting to authentication server.', true);
+                }
+            };
+        }
+
+        function saveReportAsPdf() {
+            document.title = 'Quiz Report - Submission';
+            window.print();
+        }
+
+        async function renderSubmissionReport(submissionId) {
+            showLoading('Loading submission details...');
+
+            try {
+                let data = null;
+
+                if (client) {
+                    const res = await withTimeout(
+                        client.from(SUPABASE_SUBMISSIONS_TABLE).select('*').eq('id', submissionId).single(),
+                        3000
+                    ).catch(() => null);
+                    if (res && res.data) data = res.data;
+                }
+
+                if (!data) {
+                    const localSubmissions = JSON.parse(localStorage.getItem('quizLeaderboard') || '[]');
+                    const found = localSubmissions.find(s => s.id === submissionId || s.admissionNo === submissionId);
+                    if (found) {
+                        data = {
+                            student_name: found.name,
+                            admission_no: found.admissionNo,
+                            score: found.score,
+                            total_questions: found.total,
+                            percentage: found.percentage,
+                            total_violations: found.violations,
+                            student_responses_json: []
+                        };
+                    }
+                }
+
+                if (!data) throw new Error("Submission record not found.");
+
+                const reportData = data.student_responses_json || [];
+                const totalTimeSpent = reportData.reduce((sum, q) => sum + (q.time_spent_seconds || 0), 0);
+
+                APP_CONTAINER.className = "flex items-start justify-center min-h-screen p-4 bg-slate-100";
+                APP_CONTAINER.innerHTML = `
+                    <div class="w-full max-w-5xl bg-white rounded-2xl shadow-xl border border-slate-200/80 p-8 mt-6 mb-12" id="reportContainer">
+                        <div class="flex justify-between items-center mb-6 border-b pb-4 no-print">
+                            <h2 class="text-xl font-bold text-slate-800">Student Examination Report</h2>
+                            <div class="flex gap-2">
+                                <button onclick="saveReportAsPdf()" class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white font-bold rounded-xl shadow text-xs flex items-center gap-2"><i class="fas fa-file-pdf"></i> Print / Save PDF</button>
+                                <button onclick="setView('leaderboard')" class="px-4 py-2 bg-slate-500 hover:bg-slate-600 text-white font-bold rounded-xl shadow text-xs flex items-center gap-2"><i class="fas fa-arrow-left"></i> Back</button>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                            <div class="p-4 bg-slate-50 rounded-xl border border-slate-200">
+                                <p class="text-xs font-semibold text-slate-500">Student Name</p>
+                                <p class="text-base font-bold text-slate-900">${data.student_name}</p>
+                            </div>
+                            <div class="p-4 bg-slate-50 rounded-xl border border-slate-200">
+                                <p class="text-xs font-semibold text-slate-500">Admission No.</p>
+                                <p class="text-base font-bold text-slate-900">${data.admission_no}</p>
+                            </div>
+                            <div class="p-4 bg-emerald-50 rounded-xl border border-emerald-200">
+                                <p class="text-xs font-semibold text-emerald-700">Score Achieved</p>
+                                <p class="text-base font-bold text-emerald-900">${data.score} / ${data.total_questions} (${data.percentage}%)</p>
+                            </div>
+                            <div class="p-4 bg-red-50 rounded-xl border border-red-200">
+                                <p class="text-xs font-semibold text-red-700">Violations</p>
+                                <p class="text-base font-bold text-red-900">${data.total_violations}</p>
+                            </div>
+                        </div>
+
+                        <div class="mb-6 p-4 bg-blue-50 rounded-xl border border-blue-200 text-xs">
+                            <p class="font-bold text-blue-900 mb-1"><i class="far fa-clock"></i> Time Statistics:</p>
+                            <p class="text-slate-700">Active Question Time: <span class="font-bold text-slate-900">${formatTime(totalTimeSpent)}</span></p>
+                        </div>
+                        
+                        <h3 class="text-lg font-bold text-slate-800 mb-4">Question Breakdown</h3>
+                        <div class="space-y-4">
+                            ${reportData.length === 0 ? '<p class="text-slate-500 text-xs">Detailed response breakdown saved locally on device.</p>' : ''}
+                            ${reportData.map(q => {
+                                const isAnswered = q.student_response !== null && q.student_response !== undefined;
+                                let cardClass = 'bg-slate-50 border-slate-200'; 
+                                let iconClass = 'fa-circle-question text-slate-400';
+                                let responseText = '<span class="italic text-slate-400">Not Attempted</span>';
+                                
+                                if (isAnswered) {
+                                    responseText = q.student_response;
+                                    if (q.is_correct) {
+                                        cardClass = 'bg-emerald-50/60 border-emerald-200'; 
+                                        iconClass = 'fa-circle-check text-emerald-600';
+                                    } else {
+                                        cardClass = 'bg-red-50/60 border-red-200'; 
+                                        iconClass = 'fa-circle-xmark text-red-600';
+                                    }
+                                }
+
+                                return `
+                                    <div class="p-4 rounded-xl border ${cardClass} text-xs space-y-2">
+                                        <div class="flex justify-between items-start gap-2">
+                                            <h4 class="font-bold text-slate-900 text-sm">Q${q.question_number}: ${q.question_text}</h4>
+                                            <i class="fas ${iconClass} text-lg"></i>
+                                        </div>
+                                        <div class="pt-2 border-t border-slate-200/60 grid grid-cols-1 md:grid-cols-2 gap-2">
+                                            <p><span class="font-bold text-slate-500">Response:</span> <span class="font-bold text-slate-800">${responseText}</span></p>
+                                            <p><span class="font-bold text-slate-500">Correct Answer:</span> <span class="font-bold text-emerald-700">${q.correct_answer}</span></p>
+                                        </div>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+                `;
+            } catch (e) {
+                showTempMessage(`Failed to load report: ${e.message}`, true);
+                setView('leaderboard');
+            } finally {
+                hideLoading();
+            }
+        }
+
+        async function renderLeaderboard() {
+            APP_CONTAINER.className = "flex items-start justify-center min-h-screen p-4 bg-slate-100";
+            APP_CONTAINER.innerHTML = `
+                <div class="w-full max-w-6xl bg-white rounded-2xl shadow-xl border border-slate-200/80 p-8 mt-6 mb-12">
+                    <div class="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
+                        <h2 class="text-2xl font-bold text-slate-800">Admin Submissions Dashboard</h2>
+                        <div class="flex flex-wrap gap-2">
+                            <button id="refreshBtn" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow text-xs flex items-center gap-2"><i class="fas fa-sync-alt"></i> Refresh</button>
+                            <button id="quizToggle" class="px-4 py-2 text-white font-bold rounded-xl bg-slate-400 text-xs" disabled>Loading...</button>
+                            <button id="homeBtn" class="px-4 py-2 border border-slate-300 hover:bg-slate-50 text-slate-700 font-bold rounded-xl text-xs">Log Out</button>
+                        </div>
+                    </div>
+                    
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6 p-4 bg-slate-50 rounded-xl border border-slate-200">
+                        <div>
+                            <label class="block text-xs font-bold text-slate-500 mb-1">SEARCH</label>
+                            <input type="text" id="searchInput" placeholder="Name or Admission No..." class="w-full border rounded-xl px-3 py-2 text-xs bg-white outline-none focus:ring-2 focus:ring-blue-500">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-slate-500 mb-1">SORT</label>
+                            <select id="sortSelect" class="w-full border rounded-xl px-3 py-2 text-xs bg-white outline-none">
+                                <option value="score_desc">Highest Score First</option>
+                                <option value="score_asc">Lowest Score First</option>
+                                <option value="violation_desc">Most Violations First</option>
+                                <option value="date_desc">Newest First</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-slate-500 mb-1">TIME RANGE</label>
+                            <select id="dateFilter" class="w-full border rounded-xl px-3 py-2 text-xs bg-white outline-none">
+                                <option value="all">All Submissions</option>
+                                <option value="today">Today Only</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="overflow-x-auto rounded-xl border border-slate-200">
+                        <table class="min-w-full divide-y divide-slate-200 text-xs">
+                            <thead class="bg-slate-50">
+                                <tr>
+                                    <th class="px-4 py-3 text-left font-bold text-slate-600 uppercase">#</th>
+                                    <th class="px-4 py-3 text-left font-bold text-slate-600 uppercase">Student Info</th>
+                                    <th class="px-4 py-3 text-left font-bold text-slate-600 uppercase">Admission</th>
+                                    <th class="px-4 py-3 text-left font-bold text-slate-600 uppercase">Score</th>
+                                    <th class="px-4 py-3 text-left font-bold text-slate-600 uppercase">Violations</th>
+                                    <th class="px-4 py-3 text-left font-bold text-slate-600 uppercase">Date</th>
+                                    <th class="px-4 py-3 text-left font-bold text-slate-600 uppercase">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="leaderboardBody" class="divide-y divide-slate-200">
+                                <tr><td colspan="7" class="p-8 text-center text-slate-500"><div class="spinner mx-auto mb-2"></div>Loading data...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>`;
+
+            await fetchQuizActiveStatus();
+            const quizToggleBtn = document.getElementById('quizToggle');
+
+            quizToggleBtn.disabled = false;
+            quizToggleBtn.textContent = `Global Exam: ${isQuizActive ? 'ENABLED' : 'DISABLED'}`;
+            quizToggleBtn.className = `px-4 py-2 text-white font-bold rounded-xl text-xs transition ${isQuizActive ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-red-600 hover:bg-red-700'}`;
+
+            const fetchAndRender = async () => {
+                const tbody = document.getElementById('leaderboardBody');
+                tbody.innerHTML = `<tr><td colspan="7" class="p-8 text-center text-slate-500"><div class="spinner mx-auto mb-2"></div>Updating submissions...</td></tr>`;
+                
+                const searchTerm = document.getElementById('searchInput').value.trim().toLowerCase();
+                const sortValue = document.getElementById('sortSelect').value;
+                const dateFilter = document.getElementById('dateFilter').value;
+
+                let data = null;
+
+                if (client) {
+                    try {
+                        let query = client.from(SUPABASE_SUBMISSIONS_TABLE).select('*');
+                        if (searchTerm) {
+                            query = query.or(`student_name.ilike.%${searchTerm}%,admission_no.ilike.%${searchTerm}%`);
+                        }
+                        if (dateFilter === 'today') { 
+                            const todayStart = new Date(); 
+                            todayStart.setHours(0,0,0,0); 
+                            query = query.gte('submission_time', todayStart.toISOString()); 
+                        }
+
+                        switch(sortValue) {
+                            case 'score_desc': query = query.order('score', { ascending: false }); break;
+                            case 'score_asc': query = query.order('score', { ascending: true }); break;
+                            case 'violation_desc': query = query.order('total_violations', { ascending: false }); break;
+                            case 'date_desc': query = query.order('submission_time', { ascending: false }); break;
+                            default: query = query.order('score', { ascending: false });
+                        }
+
+                        const res = await withTimeout(query, 3000);
+                        if (res && res.data) data = res.data;
+                    } catch (e) {
+                        console.warn('Leaderboard remote fetch warning:', e.message);
+                    }
+                }
+
+                // Fallback to local storage records if remote table returns null/fails
+                if (!data) {
+                    const localSubmissions = JSON.parse(localStorage.getItem('quizLeaderboard') || '[]');
+                    data = localSubmissions.map(item => ({
+                        id: item.id || item.admissionNo,
+                        student_name: item.name,
+                        college_email: item.email,
+                        admission_no: item.admissionNo,
+                        score: item.score,
+                        total_questions: item.total,
+                        total_violations: item.violations,
+                        submission_time: item.timestamp
+                    }));
+
+                    if (searchTerm) {
+                        data = data.filter(s => 
+                            (s.student_name && s.student_name.toLowerCase().includes(searchTerm)) ||
+                            (s.admission_no && s.admission_no.toLowerCase().includes(searchTerm))
+                        );
+                    }
+
+                    if (sortValue === 'score_desc') data.sort((a,b) => b.score - a.score);
+                    else if (sortValue === 'score_asc') data.sort((a,b) => a.score - b.score);
+                    else if (sortValue === 'violation_desc') data.sort((a,b) => b.total_violations - a.total_violations);
+                }
+
+                if (!data || data.length === 0) { 
+                    tbody.innerHTML = `<tr><td colspan="7" class="p-6 text-center text-slate-500 font-medium">No submission records found.</td></tr>`; 
+                    return; 
+                }
+
+                tbody.innerHTML = data.map((entry, i) => `
+                    <tr class="${i % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'} hover:bg-blue-50/30 transition">
+                        <td class="px-4 py-3 font-mono text-slate-400 font-semibold">${i + 1}</td>
+                        <td class="px-4 py-3">
+                            <p class="font-bold text-slate-900">${entry.student_name || 'Unknown'}</p>
+                            <p class="text-[11px] text-slate-400">${entry.college_email || 'N/A'}</p>
+                        </td>
+                        <td class="px-4 py-3 font-medium text-slate-700">${entry.admission_no || '-'}</td>
+                        <td class="px-4 py-3 font-bold text-slate-900">${entry.score} / ${entry.total_questions || 10}</td>
+                        <td class="px-4 py-3 font-bold ${entry.total_violations > 0 ? 'text-red-600' : 'text-emerald-600'}">${entry.total_violations || 0}</td>
+                        <td class="px-4 py-3 text-slate-400 text-[11px]">${entry.submission_time ? new Date(entry.submission_time).toLocaleString() : 'N/A'}</td>
+                        <td class="px-4 py-3">
+                            <button onclick="renderSubmissionReport('${entry.id}')" class="text-blue-600 hover:text-blue-800 font-bold border border-blue-200 px-2.5 py-1 rounded-lg hover:bg-blue-50 transition">
+                                Report
+                            </button>
+                        </td>
+                    </tr>
+                `).join('');
+            };
+
+            document.getElementById('homeBtn').onclick = () => setView('signin');
+            
+            quizToggleBtn.onclick = async () => { 
+                const newStatus = !isQuizActive; 
+                quizToggleBtn.disabled = true;
+
+                try {
+                    if (client) {
+                        await withTimeout(
+                            client.from(SUPABASE_STATUS_TABLE).update({ is_active: newStatus }).eq('id', 1),
+                            3000
+                        );
+                    }
+                    isQuizActive = newStatus; 
+                } catch (e) {
+                    showTempMessage("Status updated locally.", false);
+                    isQuizActive = newStatus;
+                } finally {
+                    quizToggleBtn.disabled = false;
+                    quizToggleBtn.textContent = `Global Exam: ${isQuizActive ? 'ENABLED' : 'DISABLED'}`;
+                    quizToggleBtn.className = `px-4 py-2 text-white font-bold rounded-xl text-xs transition ${isQuizActive ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-red-600 hover:bg-red-700'}`;
+                }
+            };
+
+            document.getElementById('refreshBtn').onclick = fetchAndRender;
+            document.getElementById('sortSelect').addEventListener('change', fetchAndRender);
+            document.getElementById('dateFilter').addEventListener('change', fetchAndRender);
+            
+            let searchTimeout;
+            document.getElementById('searchInput').addEventListener('input', () => { 
+                clearTimeout(searchTimeout); 
+                searchTimeout = setTimeout(fetchAndRender, 400); 
+            });
+            
+            fetchAndRender();
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            setView('signin');
+            QUIZ_OFF_CONFIRM_BTN.onclick = () => { 
+                isModalOpen = false;
+                QUIZ_OFF_MODAL.style.display = 'none'; 
+            };
+            
+            const fsHandler = () => {
+                if (isQuizSubmitted || !isProctoringActive || isModalOpen) return; 
+                
+                const isFS = document.fullscreenElement || document.webkitFullscreenElement;
+                if (!isFS && canFullscreen() && proctoringViolations.total < MAX_VIOLATIONS) {
+                    handleProctoringViolation('windowSwitch', 'blur'); 
+                }
+            };
+
+            ['fullscreenchange','webkitfullscreenchange','mozfullscreenchange'].forEach(e => {
+                document.addEventListener(e, fsHandler);
+            });
+        });
+    </script>
+</body>
+</html>
