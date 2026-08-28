@@ -919,7 +919,7 @@
 
             startQuizBtn.disabled = false;
             const modeTag = isUsingFallbackQuestions ? ' • Backup Bank' : ' • Online';
-            startQuizBtn.innerHTML = `Continue to Proctoring Rules (${quizQuestions.length} Questions)${modeTag} <i class="fas fa-arrow-right"></i>`;
+            startQuizBtn.innerHTML = `Continue (${quizQuestions.length} Questions)${modeTag} <i class="fas fa-arrow-right"></i>`;
 
             document.getElementById('signInForm').addEventListener('submit', function(e) { 
                 e.preventDefault();
