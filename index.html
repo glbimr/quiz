@@ -165,7 +165,7 @@
     <script>
         // --- SUPABASE CONFIGURATION ---
         const SUPABASE_URL = 'https://btrhdgvmygunupitiapf.supabase.co'; 
-        const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ0cmhkZ3ZteWd1bnVwaXRpYXBmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA3MzQxOTYsImV4cCI6MjA4NjMxMDE5Nn0.v7UXz7GvUSsknsbYM4a-uzNaHthgET_0X8-lavs9Krw';
+        const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ0cmhkZ3ZteWd1bnVwaXRpYXBmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA3MzQxOTXsImV4cCI6MjA4NjMxMDE5Nn0.v7UXz7GvUSsknsbYM4a-uzNaHthgET_0X8-lavs9Krw';
         
         const SUPABASE_SUBMISSIONS_TABLE = 'quiz_submissions'; 
         const SUPABASE_QUESTIONS_TABLE = 'quiz_questions';
@@ -278,6 +278,8 @@
         const MAX_VIOLATIONS = 3;
         const WINDOW_SWITCH_COOLDOWN = 1200; // Cooldown between consecutive switch triggers
         let violationCooldown = false; 
+        
+        let isProctoringGracePeriod = false; 
 
         // Gesture Touch Coordinates Tracking
         let touchStartX = 0;
@@ -370,12 +372,12 @@
             }, 3500);
         }
 
-        function saveResultLocally(name, email, admissionNo, score, totalQuestions, violations) {
+        function saveResultLocally(name, email, admissionNo, section, score, totalQuestions, violations) {
             const leaderboard = JSON.parse(localStorage.getItem('quizLeaderboard') || '[]');
             const percentageVal = ((score / totalQuestions) * 100).toFixed(2);
             const result = {
                 id: generateUUID(),
-                name, email, admissionNo, score, total: totalQuestions,
+                name, email, admissionNo, section, score, total: totalQuestions,
                 percentage: percentageVal,
                 violations: violations.total, 
                 windowSwitchViolations: violations.windowSwitch, 
@@ -431,6 +433,7 @@
                 student_name: resultData.name,
                 college_email: resultData.email,
                 admission_no: resultData.admissionNo,
+                section: resultData.section,
                 time_left_seconds: timeLeftSeconds,
                 student_responses_json: detailedResponses,
             };
@@ -622,11 +625,11 @@
         };
         
         const windowBlurHandler = () => { 
-            if (!isProctoringActive || isQuizSubmitted || isModalOpen || violationCooldown) return;
+            if (!isProctoringActive || isQuizSubmitted || isModalOpen || violationCooldown || isProctoringGracePeriod) return;
             
             if (isMobileDevice) {
                 setTimeout(() => {
-                    if ((document.hidden || !document.hasFocus()) && !isModalOpen) {
+                    if ((document.hidden || !document.hasFocus()) && !isModalOpen && !isProctoringGracePeriod) {
                         handleProctoringViolation('windowSwitch', 'blur');
                     }
                 }, 300);
@@ -695,6 +698,11 @@
         function enableProctoring() {
             if (isProctoringActive) return;
             isProctoringActive = true;
+            
+            isProctoringGracePeriod = true;
+            setTimeout(() => {
+                isProctoringGracePeriod = false;
+            }, 1500); // 1.5 second grace period to allow fullscreen transition and UI render
 
             document.addEventListener('visibilitychange', visibilityChangeHandler);
             window.addEventListener('pagehide', pageHideHandler);
@@ -825,6 +833,22 @@
                             <label class="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">Admission No.</label>
                             <input type="text" id="admissionNo" required placeholder="ADM-2026-XXXX" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-slate-800 outline-none transition text-sm">
                         </div>
+                        <div>
+                            <label class="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">Section</label>
+                            <select id="studentSection" required class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-slate-800 outline-none transition text-sm bg-white cursor-pointer">
+                                <option value="" disabled selected>Select your section</option>
+                                <option value="A">Section A</option>
+                                <option value="B">Section B</option>
+                                <option value="C">Section C</option>
+                                <option value="D">Section D</option>
+                                <option value="E">Section E</option>
+                                <option value="F">Section F</option>
+                                <option value="G">Section G</option>
+                                <option value="H">Section H</option>
+                                <option value="I">Section I</option>
+                                <option value="J">Section J</option>
+                            </select>
+                        </div>
                         <button type="submit" id="startQuizBtn" class="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl transition duration-200 shadow-md shadow-blue-500/20 mt-6 text-sm flex items-center justify-center gap-2" disabled>
                             Start Quiz
                         </button>
@@ -854,7 +878,8 @@
                 studentInfo = {
                     name: document.getElementById('studentName').value.trim(),
                     email: emailInput.value.trim().toLowerCase(), 
-                    admissionNo: document.getElementById('admissionNo').value.trim()
+                    admissionNo: document.getElementById('admissionNo').value.trim(),
+                    section: document.getElementById('studentSection').value
                 };
 
                 if (!studentInfo.email.endsWith(requiredDomain)) {
@@ -930,8 +955,14 @@
                 }
                 
                 shuffleArray(quizQuestions); 
-                requestFullScreen();
-                enableProctoring();
+                
+                // Request fullscreen first, then enable proctoring to avoid triggering blur during transition
+                requestFullScreen().then(() => {
+                    enableProctoring();
+                }).catch(() => {
+                    // Fallback if fullscreen fails/rejected, still enable proctoring
+                    enableProctoring();
+                });
                 
                 if (quizQuestions.length > 0) {
                      questionStatus[0] = 1;
@@ -1034,6 +1065,7 @@
                 <div class="p-3 bg-slate-50 rounded-xl border border-slate-200/80 mb-6 text-xs flex flex-wrap justify-between items-center gap-2">
                     <div><span class="font-bold text-slate-500">Student:</span> <span class="font-semibold text-slate-800">${studentInfo.name || 'N/A'}</span></div>
                     <div><span class="font-bold text-slate-500">Admission No:</span> <span class="font-semibold text-slate-800">${studentInfo.admissionNo || 'N/A'}</span></div>
+                    <div><span class="font-bold text-slate-500">Section:</span> <span class="font-semibold text-slate-800">${studentInfo.section || 'N/A'}</span></div>
                 </div>
             `;
 
@@ -1106,7 +1138,7 @@
                 time_spent_seconds: questionTimings[idx] || 0 
             }));
 
-            const result = saveResultLocally(studentInfo.name, studentInfo.email, studentInfo.admissionNo, score, quizQuestions.length, proctoringViolations);
+            const result = saveResultLocally(studentInfo.name, studentInfo.email, studentInfo.admissionNo, studentInfo.section, score, quizQuestions.length, proctoringViolations);
             const uploadStatus = await uploadResultToSupabase(result, detailedResponses, timeLeft);
             
             hideLoading();
@@ -1146,6 +1178,7 @@
                     <div class="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6 text-left space-y-1 text-xs">
                         <p><span class="font-bold text-slate-500">Student Name:</span> <span class="font-bold text-slate-900">${studentInfo.name}</span></p>
                         <p><span class="font-bold text-slate-500">Admission No:</span> <span class="font-mono font-bold text-slate-900">${studentInfo.admissionNo}</span></p>
+                        <p><span class="font-bold text-slate-500">Section:</span> <span class="font-bold text-slate-900">${studentInfo.section}</span></p>
                     </div>
 
                     <div class="bg-blue-50/80 border border-blue-100 p-5 rounded-xl mb-6 text-left">
@@ -1253,6 +1286,7 @@
                         data = {
                             student_name: found.name,
                             admission_no: found.admissionNo,
+                            section: found.section,
                             score: found.score,
                             total_questions: found.total,
                             percentage: found.percentage,
@@ -1274,11 +1308,7 @@
                             <h2 class="text-xl font-bold text-slate-800">Student Examination Report</h2>
                             <div class="flex gap-2">
                                 <button onclick="saveReportAsPdf()" class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white font-bold rounded-xl shadow text-xs flex items-center gap-2"><i class="fas fa-file-pdf"></i> Print / Save PDF</button>
-                                <button onclick="setView('leaderboard')" class="px-4 py-2 bg-slate-500 hover:bg-slate-600 text-white font-bold rounded-xl shadow text-xs flex items-center gap-2"><i class="fas fa-arrow-left"></i> Back</button>
-                            </div>
-                        </div>
-
-                        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                        <div class="grid grid-cols-1 md:grid-cols-5 gap-4 mb-6">
                             <div class="p-4 bg-slate-50 rounded-xl border border-slate-200">
                                 <p class="text-xs font-semibold text-slate-500">Student Name</p>
                                 <p class="text-base font-bold text-slate-900">${data.student_name}</p>
@@ -1286,6 +1316,10 @@
                             <div class="p-4 bg-slate-50 rounded-xl border border-slate-200">
                                 <p class="text-xs font-semibold text-slate-500">Admission No.</p>
                                 <p class="text-base font-bold text-slate-900">${data.admission_no}</p>
+                            </div>
+                            <div class="p-4 bg-slate-50 rounded-xl border border-slate-200">
+                                <p class="text-xs font-semibold text-slate-500">Section</p>
+                                <p class="text-base font-bold text-slate-900">${data.section || 'N/A'}</p>
                             </div>
                             <div class="p-4 bg-emerald-50 rounded-xl border border-emerald-200">
                                 <p class="text-xs font-semibold text-emerald-700">Score Achieved</p>
@@ -1454,6 +1488,7 @@
                         student_name: item.name,
                         college_email: item.email,
                         admission_no: item.admissionNo,
+                        section: item.section,
                         score: item.score,
                         total_questions: item.total,
                         total_violations: item.violations,
@@ -1484,7 +1519,10 @@
                             <p class="font-bold text-slate-900">${entry.student_name || 'Unknown'}</p>
                             <p class="text-[11px] text-slate-400">${entry.college_email || 'N/A'}</p>
                         </td>
-                        <td class="px-4 py-3 font-medium text-slate-700">${entry.admission_no || '-'}</td>
+                        <td class="px-4 py-3">
+                            <p class="font-medium text-slate-700">${entry.admission_no || '-'}</p>
+                            <p class="text-[11px] text-slate-400">Sec: ${entry.section || 'N/A'}</p>
+                        </td>
                         <td class="px-4 py-3 font-bold text-slate-900">${entry.score} / ${entry.total_questions || 10}</td>
                         <td class="px-4 py-3 font-bold ${entry.total_violations > 0 ? 'text-red-600' : 'text-emerald-600'}">${entry.total_violations || 0}</td>
                         <td class="px-4 py-3 text-slate-400 text-[11px]">${entry.submission_time ? new Date(entry.submission_time).toLocaleString() : 'N/A'}</td>
@@ -1542,7 +1580,7 @@
             };
             
             const fsHandler = () => {
-                if (isQuizSubmitted || !isProctoringActive || isModalOpen) return; 
+                if (isQuizSubmitted || !isProctoringActive || isModalOpen || isProctoringGracePeriod) return; 
                 
                 const isFS = document.fullscreenElement || document.webkitFullscreenElement;
                 if (!isFS && canFullscreen() && proctoringViolations.total < MAX_VIOLATIONS) {
